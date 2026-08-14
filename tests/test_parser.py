@@ -78,6 +78,24 @@ def test_alt_screen_restores_cursor_position():
     assert screen.cursor_col == 5
 
 
+def test_alt_screen_mode_1047_does_not_restore_cursor():
+    # Verified against kitty's screen_toggle_screen_buffer: only mode 1049 saves
+    # and restores the cursor; 47/1047 leave it wherever it ended up.
+    screen = _run(b"12345\x1b[?1047h")
+    assert (screen.cursor_row, screen.cursor_col) == (0, 0)
+    Parser(screen).feed(b"\x1b[3;3Hx\x1b[?1047l")  # move around inside alt screen
+    assert (screen.cursor_row, screen.cursor_col) == (2, 3)  # left where it was, not restored
+
+
+def test_alt_screen_1049_reuses_decsc_save_slot():
+    # kitty's 1049 entry calls the *same* screen_save_cursor DECSC uses, so an
+    # earlier ESC 7 save gets clobbered by a subsequent 1049 entry: restoring on
+    # exit lands at (0,0) -- where the cursor was right before 1049 entry -- not
+    # back at (4,4), which is where the original ESC 7 alone would have restored to.
+    screen = _run(b"\x1b[5;5H\x1b7\x1b[1;1H\x1b[?1049hx\x1b[?1049l")
+    assert (screen.cursor_row, screen.cursor_col) == (0, 0)
+
+
 def test_decsc_decrc_save_restore_cursor():
     screen = _run(b"\x1b[3;5H\x1b7\x1b[1;1Hx\x1b8y")
     assert screen.grid[0][0].char == "x"
@@ -116,6 +134,14 @@ def test_sgr_truecolor_colon_form():
     # for truecolor SGR -- must not get concatenated into the wrong parameter.
     screen = _run(b"\x1b[38:2:255:0:0mx")
     assert screen.grid[0][0].fg == (255, 0, 0)
+
+
+def test_sgr_truecolor_colon_form_with_colorspace_id():
+    # The full ITU T.416 form (38:2:<colorspace-id>:r:g:b) end-to-end through the
+    # real parser, not just Screen.sgr directly -- confirms _is_subparam tracking
+    # actually reaches the color logic correctly from real escape bytes.
+    screen = _run(b"\x1b[38:2:0:255:0:128mx")
+    assert screen.grid[0][0].fg == (255, 0, 128)
 
 
 def test_osc_sequence_terminated_by_bel_is_skipped():

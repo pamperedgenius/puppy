@@ -39,13 +39,16 @@ class Screen:
         # deque(maxlen=...) self-bounds memory instead of growing forever on a
         # long-running session or a `cat` of a huge file.
         self.scrollback: deque[list[Cell]] = deque(maxlen=scrollback_limit)
-        # DECSC/DECRC (ESC 7/8) cursor save slot -- separate from the alt-screen's
-        # own implicit save/restore below, matching real terminal behavior.
+        # DECSC/DECRC (ESC 7/8) cursor save slot. Confirmed against kitty's real
+        # screen_toggle_screen_buffer (screen.c): entering/exiting the alternate
+        # screen buffer via mode 1049 reuses this *same* slot (calls
+        # screen_save_cursor/screen_restore_cursor directly) rather than keeping a
+        # separate one -- so a DECSC done right before a 1049 entry gets clobbered
+        # by it, same as on a real terminal.
         self._dec_saved_cursor: tuple[int, int] | None = None
         # Alternate screen buffer (DECSET 47/1047/1049), used by vim/less/htop etc.
         self._alt_active = False
         self._saved_main_grid: list[list[Cell]] | None = None
-        self._saved_main_cursor: tuple[int, int] = (0, 0)
 
     @staticmethod
     def _default_sgr() -> dict:
@@ -86,24 +89,29 @@ class Screen:
 
     # --- alternate screen buffer (DECSET 47/1047/1049) ---
 
-    def enter_alt_screen(self) -> None:
+    def enter_alt_screen(self, save_cursor: bool = True) -> None:
+        """save_cursor is only True for mode 1049; 47/1047 don't touch cursor state
+        at all, per kitty's screen_toggle_screen_buffer -- the caller (Parser)
+        decides which, based on which mode number was actually seen."""
         if self._alt_active:
             return
         self._alt_active = True
         self._saved_main_grid = self.grid
-        self._saved_main_cursor = (self.cursor_row, self.cursor_col)
+        if save_cursor:
+            self.save_cursor()
         self.grid = self._blank_grid(self.rows, self.cols)
         self.cursor_row = 0
         self.cursor_col = 0
 
-    def exit_alt_screen(self) -> None:
+    def exit_alt_screen(self, save_cursor: bool = True) -> None:
         if not self._alt_active:
             return
         self._alt_active = False
         assert self._saved_main_grid is not None
         self.grid = self._saved_main_grid
         self._saved_main_grid = None
-        self.cursor_row, self.cursor_col = self._saved_main_cursor
+        if save_cursor:
+            self.restore_cursor()
 
     # --- writing text ---
 
@@ -161,25 +169,46 @@ class Screen:
             self.grid.insert(from_row, [Cell() for _ in range(self.cols)])
 
     def set_scroll_region(self, top: int = 0, bottom: int = 0) -> None:
-        """DECSTBM (CSI Pt;Pb r). top/bottom are 1-indexed; 0 means "unspecified"."""
-        t = top - 1 if top > 0 else 0
-        b = bottom - 1 if bottom > 0 else self.rows - 1
-        if t < 0 or b >= self.rows or t >= b:
-            return  # invalid region, ignored per real terminal behavior
+        """DECSTBM (CSI Pt;Pb r). top/bottom are 1-indexed; 0 means "unspecified".
+
+        Ported from kitty's screen_set_margins (kitty/screen.c): out-of-range values
+        are clamped to the screen, not rejected outright -- only checked afterwards
+        for the ambiguous span == 1 row -- confirmed by reading kitty's real source
+        rather than assumed, after "does this actually match kitty" came up.
+        """
+        top = top if top > 0 else 1
+        bottom = bottom if bottom > 0 else self.rows
+        top = min(self.rows, top)
+        bottom = min(self.rows, bottom)
+        t = top - 1
+        b = bottom - 1
+        if b <= t:
+            return  # invalid/degenerate region, ignored per real terminal behavior
         self.scroll_top = t
         self.scroll_bottom = b
         self.cursor_row = 0
         self.cursor_col = 0
 
     def insert_lines(self, n: int = 1) -> None:
-        """IL (CSI Pn L): insert n blank lines at the cursor row, within the region."""
+        """IL (CSI Pn L): insert n blank lines at the cursor row, within the region.
+
+        Also does a carriage return, per kitty's real screen_insert_lines (screen.c)
+        -- confirmed by reading the source, not assumed from the DEC/ECMA-48 spec
+        text alone, which doesn't mention it. ICH/DCH do *not* do this, only the
+        line-level ops.
+        """
         if self.scroll_top <= self.cursor_row <= self.scroll_bottom:
             self._shift_down(self.cursor_row, self.scroll_bottom, n)
+            self.carriage_return()
 
     def delete_lines(self, n: int = 1) -> None:
-        """DL (CSI Pn M): delete n lines at the cursor row, within the region."""
+        """DL (CSI Pn M): delete n lines at the cursor row, within the region.
+
+        Also does a carriage return, matching kitty's real screen_delete_lines.
+        """
         if self.scroll_top <= self.cursor_row <= self.scroll_bottom:
             self._shift_up(self.cursor_row, self.scroll_bottom, n)
+            self.carriage_return()
 
     def insert_chars(self, n: int = 1) -> None:
         """ICH (CSI Pn @): insert n blank cells at the cursor, within the line."""
@@ -258,9 +287,11 @@ class Screen:
 
     # --- SGR (colors/attributes) ---
 
-    def sgr(self, params: list[int]) -> None:
+    def sgr(self, params: list[int], is_subparam: list[bool] | None = None) -> None:
         if not params:
             params = [0]
+        if is_subparam is None or len(is_subparam) != len(params):
+            is_subparam = [False] * len(params)
         i = 0
         while i < len(params):
             p = params[i]
@@ -292,9 +323,24 @@ class Screen:
                 if mode == 5 and i + 2 < len(params):
                     self._sgr[target] = params[i + 2]
                     i += 2
-                elif mode == 2 and i + 4 < len(params):
-                    self._sgr[target] = (params[i + 2], params[i + 3], params[i + 4])
-                    i += 4
+                elif mode == 2:
+                    # Ported from kitty's real sub-param handling (vt-parser.c,
+                    # select_graphic_rendition): collect every ':'-chained value
+                    # that follows, rather than assuming a fixed field count. ITU
+                    # T.416 puts an optional color-space id *before* r/g/b, so
+                    # whatever was collected, the last 3 values are always r, g, b
+                    # -- correct for both `38:2:r:g:b` and `38:2:<cs>:r:g:b`.
+                    # Plain `;`-separated form isn't sub-param-tracked at all, so
+                    # it falls back to the fixed classic 3-param read.
+                    end = i + 2
+                    while end < len(params) and is_subparam[end]:
+                        end += 1
+                    if end == i + 2:
+                        end = min(i + 5, len(params))
+                    components = params[i + 2:end]
+                    if len(components) >= 3:
+                        self._sgr[target] = tuple(components[-3:])
+                        i = end - 1
             i += 1
 
     # --- debug ---

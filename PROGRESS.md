@@ -20,6 +20,41 @@ end of every work session** (not mid-session) so progress is never sitting only 
 machine — a placeholder push happened 2026-08-13 even though the session wasn't over,
 per explicit request.
 
+## Kitty-source verification pass (2026-08-15)
+
+Prompted by a direct question ("have you actually been following kitty's protocols?").
+Answer at the time: baseline VT100/xterm sequences had been implemented from spec
+knowledge, not cross-checked line-by-line against kitty's real C source — worth being
+honest about that gap rather than just asserting compliance. Did an actual verification
+pass against `~/Projects/kitty/kitty/{screen,vt-parser}.c` and found four real,
+now-fixed divergences:
+
+1. **DECSTBM out-of-range bounds**: was rejecting the whole sequence; kitty's real
+   `screen_set_margins` clamps top/bottom to the screen height instead. Fixed to clamp.
+2. **SGR truecolor colorspace-id form** (`38:2:<colorspace>:r:g:b`): was assumed a known
+   gap; confirmed real via kitty's `select_graphic_rendition`, which tracks `:` vs `;`
+   sub-parameter boundaries (`is_sub_param`) and collects however many colon-chained
+   values follow rather than assuming a fixed count. Ported the same idea: `Parser` now
+   tracks `_is_subparam` alongside `_params`, `Screen.sgr` takes it and uses "last 3
+   collected values are r/g/b" (correct per ITU T.416 field order, colorspace-id always
+   comes first) instead of a hardcoded `params[i+2:i+5]` read.
+3. **IL/DL do a carriage return**: kitty's `screen_insert_lines`/`screen_delete_lines`
+   both call `screen_carriage_return` after shifting; `ICH`/`DCH` don't. Wasn't in any
+   spec text consulted earlier, only in the actual source. Fixed.
+4. **Alt-screen cursor handling differs by mode**: kitty's `screen_toggle_screen_buffer`
+   only saves/restores the cursor for mode `1049` — modes `47`/`1047` toggle the buffer
+   without touching cursor state at all. It also reuses the *same* save slot as
+   `DECSC`/`DECRC` (calls `screen_save_cursor` directly), not a separate one, so a
+   `DECSC` right before a `1049` entry gets clobbered by it on a real terminal. Was
+   treating all three modes identically with an independent save slot; fixed both.
+
+**Lesson**: spec-knowledge implementations of "obscure-looking" behavior (exact
+clamping rules, whether an operation also does a CR, which private modes share state)
+should be spot-checked against the real source when it's sitting right there in
+`~/Projects/kitty`, not trusted from memory — none of these four were something a
+plain reading of ECMA-48/xterm docs would have caught. Worth another pass like this
+periodically, not just once.
+
 ## Current status (2026-08-15)
 
 First slice done and pushed: `PtySession` (real PTY spawn/read/write/resize), `Parser`
@@ -33,12 +68,12 @@ which surfaced a real parser gap while verifying it: the CSI state machine never
 `:` (the ITU T.416 sub-parameter separator that kitty and most modern terminals actually
 emit for truecolor, e.g. `38:2:255:0:0`), so colon digits were silently concatenated
 onto the wrong parameter, corrupting color parsing. Fixed by treating `:` the same as
-`;` at accumulation time (correct for every sequence `Screen.sgr` actually parses; the
-rarer 6-field `38:2:<colorspace>:r:g:b` form is a known remaining gap). Also added
-scrollback: a `deque(maxlen=2000)` history that only captures lines scrolled off the
-*real* top of the *main* screen (not alt-screen scrolling, not a narrowed-DECSTBM
+`;` at accumulation time (the rarer `38:2:<colorspace>:r:g:b` colorspace-id form was
+fixed properly in the kitty-source verification pass above, not left as a gap). Also
+added scrollback: a `deque(maxlen=2000)` history that only captures lines scrolled off
+the *real* top of the *main* screen (not alt-screen scrolling, not a narrowed-DECSTBM
 region's internal scrolling, not DL) — matches real terminal behavior on what counts as
-"history". `CSI 3 J` (what `clear` actually sends) wipes it, `CSI 2 J` doesn't. 49 unit
+"history". `CSI 3 J` (what `clear` actually sends) wipes it, `CSI 2 J` doesn't. 55 unit
 tests passing, including hang-safety tests (`insert_lines`/`delete_chars` with a huge
 count must clamp to the region/line size, not loop attacker-controlled-times — same DoS
 class as the CSI-param fix below, caught proactively this time instead of by review).
@@ -126,11 +161,14 @@ with the date when something is confirmed working (not just "code exists").
       detail (no way to see a live GUI window from here) — if anything subtle looks
       wrong later (colors, cursor drift, wrapping), this is the first place to doubt.
 - [x] 256-color and 24-bit truecolor SGR (`38/48;5;n`, `38/48;2;r;g;b`, both `;`-
-      and `:`-separated forms) — 2026-08-15, unit-tested; fixed a real `:`
-      sub-parameter parsing gap along the way (see Current status)
+      and `:`-separated forms, including the `38:2:<colorspace-id>:r:g:b` variant) —
+      2026-08-15, unit-tested; two real parsing gaps found and fixed (see the
+      kitty-source verification pass above)
 - [x] Scrollback — `deque(maxlen=2000)`, only real top-of-main-screen scrolls
       captured (not alt-screen, not narrowed-DECSTBM regions, not DL), `CSI 3 J`
       clears it — 2026-08-15, unit-tested
+- [x] Kitty-source verification pass — DECSTBM clamping, IL/DL carriage-return,
+      alt-screen 47/1047-vs-1049 cursor handling — 2026-08-15, see above, unit-tested
 - [ ] Bracketed paste (2004), focus reporting (1004), synchronized output (2026)
 - [ ] Mouse protocols (1000/1002/1003/1006 SGR)
 - [ ] OSC family: title (0/1/2), palette (4/10/11), clipboard (52), hyperlinks (8)

@@ -31,6 +31,12 @@ class Parser:
         self.sink = sink
         self.state = self.GROUND
         self._params: list[str] = [""]
+        # Parallel to _params: whether each entry was introduced by ':' (an ITU
+        # T.416 sub-parameter of the previous entry) rather than ';' (a new
+        # top-level parameter). Matches kitty's own is_sub_param tracking -- needed
+        # to tell `38:2:r:g:b` apart from the rarer `38:2:<colorspace>:r:g:b`
+        # without guessing a fixed field count.
+        self._is_subparam: list[bool] = [False]
         self._private = False
         self._utf8_bytes = bytearray()
         self._osc_pending_esc = False
@@ -89,6 +95,7 @@ class Parser:
         if ch == "[":
             self.state = self.CSI
             self._params = [""]
+            self._is_subparam = [False]
             self._private = False
             return
         if ch == "]":
@@ -122,12 +129,14 @@ class Parser:
             return
         if ch in (";", ":"):
             # ':' is the ITU T.416 sub-parameter separator (used by modern truecolor
-            # SGR like `38:2:r:g:b`, which is what kitty itself emits). Flattening it
-            # into the same params list as ';' is correct for the sequences Screen.sgr
-            # actually parses (38/48 followed by mode then color components in order);
-            # it only breaks for the rarer 6-field `38:2:<colorspace>:r:g:b` form.
+            # SGR like `38:2:r:g:b`, which is what kitty itself emits). Both land in
+            # the same flat params list, but _is_subparam records which separator
+            # introduced each entry -- Screen.sgr uses that to tell a plain 3-field
+            # `38:2:r:g:b` apart from the rarer `38:2:<colorspace>:r:g:b`, the way
+            # kitty's own parser does, instead of assuming a fixed field count.
             if len(self._params) < self._MAX_PARAMS:
                 self._params.append("")
+                self._is_subparam.append(ch == ":")
             return
         if 0x40 <= byte <= 0x7E:
             self._dispatch_csi(ch)
@@ -183,7 +192,7 @@ class Parser:
                     params.append(int(p) if p else 0)
                 except ValueError:
                     params.append(0)
-            self.sink.sgr(params)
+            self.sink.sgr(params, self._is_subparam)
         # else: not yet implemented, silently ignored
 
     def _dispatch_private_mode(self, final: str) -> None:
@@ -191,11 +200,15 @@ class Parser:
             return  # only DECSET/DECRST handled so far
         enable = final == "h"
         for raw in self._params:
-            if raw and int(raw) in self._ALT_SCREEN_MODES:
+            if not raw:
+                continue
+            mode = int(raw)
+            if mode in self._ALT_SCREEN_MODES:
+                save_cursor = mode == 1049  # 47/1047 don't touch cursor state at all
                 if enable:
-                    self.sink.enter_alt_screen()
+                    self.sink.enter_alt_screen(save_cursor)
                 else:
-                    self.sink.exit_alt_screen()
+                    self.sink.exit_alt_screen(save_cursor)
 
     # --- OSC: buffer until ST (ESC \) or BEL, contents discarded for now ---
 

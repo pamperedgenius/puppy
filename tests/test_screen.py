@@ -103,10 +103,13 @@ def test_set_scroll_region_rejects_invalid_bounds():
     assert (s.scroll_top, s.scroll_bottom) == (0, 4)  # unchanged (default full screen)
 
 
-def test_set_scroll_region_huge_bottom_does_not_crash():
+def test_set_scroll_region_clamps_huge_bottom_like_kitty():
+    # kitty's real screen_set_margins (screen.c) clamps out-of-range bottom to the
+    # screen height rather than rejecting the sequence -- ported that behavior
+    # after checking against the actual source instead of assuming.
     s = Screen(rows=5, cols=2)
     s.set_scroll_region(1, 999999)
-    assert (s.scroll_top, s.scroll_bottom) == (0, 4)  # invalid (out of range), ignored
+    assert (s.scroll_top, s.scroll_bottom) == (0, 4)
 
 
 def test_insert_lines_pushes_down_within_region_only():
@@ -127,6 +130,18 @@ def test_delete_lines_pulls_up_within_region_only():
     s.cursor_position(2, 1)
     s.delete_lines(1)
     assert [row[0].char for row in s.grid] == ["a", "c", "d", " "]
+
+
+def test_insert_lines_and_delete_lines_do_carriage_return():
+    # Verified against kitty's real screen_insert_lines/screen_delete_lines
+    # (screen.c) -- both do a carriage return, unlike ICH/DCH.
+    s = Screen(rows=3, cols=5)
+    s.cursor_position(1, 3)
+    s.insert_lines(1)
+    assert s.cursor_col == 0
+    s.cursor_position(1, 3)
+    s.delete_lines(1)
+    assert s.cursor_col == 0
 
 
 def test_insert_lines_huge_count_does_not_hang():
@@ -184,6 +199,24 @@ def test_sgr_truecolor_rgb_fg_and_bg():
     s.put_char("a")
     assert s.grid[0][0].fg == (255, 0, 128)
     assert s.grid[0][0].bg == (10, 20, 30)
+
+
+def test_sgr_truecolor_with_explicit_colorspace_id():
+    # ITU T.416's full form is 38:2:<colorspace-id>:r:g:b -- the colorspace id
+    # comes before r/g/b, so the *last* 3 collected sub-params must be used, not
+    # params[i+2:i+5]. is_subparam marks every entry after the leading 38 as a
+    # ':'-chained sub-param, same as the real parser would for `38:2:0:255:0:128`.
+    s = Screen(rows=1, cols=3)
+    s.sgr([38, 2, 0, 255, 0, 128], is_subparam=[False, True, True, True, True, True])
+    s.put_char("a")
+    assert s.grid[0][0].fg == (255, 0, 128)
+
+
+def test_sgr_truecolor_semicolon_form_unaffected_by_subparam_tracking():
+    s = Screen(rows=1, cols=3)
+    s.sgr([38, 2, 255, 0, 128], is_subparam=[False, False, False, False, False])
+    s.put_char("a")
+    assert s.grid[0][0].fg == (255, 0, 128)
 
 
 def test_sgr_39_49_reset_extended_colors():
