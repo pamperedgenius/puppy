@@ -48,6 +48,48 @@ def test_private_mode_sequence_is_ignored_not_crashed():
     assert screen.dump_text().splitlines()[0] == "ok"
 
 
+def test_huge_csi_param_digit_run_does_not_crash():
+    # Regression: an unbounded digit run used to overflow Python's int-string
+    # conversion limit and raise an uncaught ValueError, crashing the parser on a
+    # single malicious/corrupt byte (e.g. from `cat`-ing an untrusted file).
+    huge_digits = b"9" * 20000
+    screen = _run(b"\x1b[" + huge_digits + b"Cx")
+    assert "x" in screen.dump_text().splitlines()[0]
+
+
+def test_huge_csi_param_count_does_not_crash():
+    many_params = b";" * 20000
+    screen = _run(b"\x1b[1" + many_params + b"mtext")
+    assert screen.dump_text().splitlines()[0] == "text"
+
+
+def test_alt_screen_hides_main_content_and_restores_it():
+    screen = _run(b"main content\x1b[?1049h" + b"alt content")
+    assert screen.dump_text().splitlines()[0] == "alt content"
+    parser_exit = Parser(screen)
+    parser_exit.feed(b"\x1b[?1049l")
+    assert screen.dump_text().splitlines()[0] == "main content"
+
+
+def test_alt_screen_restores_cursor_position():
+    screen = _run(b"12345\x1b[?1049h")
+    assert (screen.cursor_row, screen.cursor_col) == (0, 0)
+    Parser(screen).feed(b"\x1b[?1049l")
+    assert screen.cursor_col == 5
+
+
+def test_decsc_decrc_save_restore_cursor():
+    screen = _run(b"\x1b[3;5H\x1b7\x1b[1;1Hx\x1b8y")
+    assert screen.grid[0][0].char == "x"
+    assert screen.grid[2][4].char == "y"
+
+
+def test_ind_moves_down_like_linefeed():
+    screen = _run(b"\x1bDx")
+    assert screen.cursor_row == 1
+    assert screen.grid[1][0].char == "x"
+
+
 def test_osc_sequence_terminated_by_bel_is_skipped():
     screen = _run(b"\x1b]0;title\x07ok")
     assert screen.dump_text().splitlines()[0] == "ok"

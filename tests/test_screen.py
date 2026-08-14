@@ -50,3 +50,36 @@ def test_sgr_bold_persists_until_reset():
     s.put_char("b")
     assert s.grid[0][0].bold is True
     assert s.grid[0][1].bold is False
+
+
+def test_reverse_index_scrolls_region_down_at_top():
+    s = Screen(rows=3, cols=2)
+    s.put_char("a")  # row 0
+    s.cursor_position(2, 1)
+    s.put_char("b")  # row 1
+    s.cursor_position(1, 1)
+    s.reverse_index()  # at scroll_top (row 0) -> scroll whole region down
+    assert s.grid[0][0].char == " "
+    assert s.grid[1][0].char == "a"
+    assert s.grid[2][0].char == "b"
+
+
+def test_alt_screen_enter_exit_round_trip():
+    s = Screen(rows=2, cols=5)
+    s.put_char("m")
+    s.enter_alt_screen()
+    assert s.dump_text().splitlines()[0] == ""
+    s.put_char("a")
+    s.exit_alt_screen()
+    assert s.grid[0][0].char == "m"
+    assert s.cursor_col == 1  # cursor position from before entering alt screen
+
+
+def test_alt_screen_enter_is_idempotent():
+    s = Screen(rows=2, cols=5)
+    s.put_char("m")
+    s.enter_alt_screen()
+    s.put_char("a")
+    s.enter_alt_screen()  # already active, must not stomp the saved main grid
+    s.exit_alt_screen()
+    assert s.grid[0][0].char == "m"

@@ -17,6 +17,16 @@ BEL = 0x07
 class Parser:
     GROUND, ESCAPE, CHARSET, CSI, OSC = range(5)
 
+    # Caps on CSI parameter accumulation. A malicious/corrupt byte stream (an
+    # untrusted file, a compromised remote program's output) could otherwise send an
+    # unbounded run of digits or ';'s; without a cap, int() on a long enough digit
+    # string raises ValueError (Python's int-string-conversion limit, PEP 3.11+) and
+    # crashes the whole parser on a single byte. 7 digits (max ~9999999) and 32 params
+    # comfortably cover every real sequence (truecolor SGR needs 3-digit r/g/b) while
+    # keeping worst-case cost bounded.
+    _MAX_PARAM_LEN = 7
+    _MAX_PARAMS = 32
+
     def __init__(self, sink) -> None:
         self.sink = sink
         self.state = self.GROUND
@@ -88,7 +98,15 @@ class Parser:
         if ch in "()*+":
             self.state = self.CHARSET
             return
-        # DECSC/DECRC/RIS/etc. not yet implemented
+        if ch == "7":
+            self.sink.save_cursor()
+        elif ch == "8":
+            self.sink.restore_cursor()
+        elif ch == "D":
+            self.sink.index()
+        elif ch == "M":
+            self.sink.reverse_index()
+        # RIS and other single-char ESC sequences not yet implemented
         self.state = self.GROUND
 
     # --- CSI: collect params, dispatch on final byte ---
@@ -99,10 +117,12 @@ class Parser:
             self._private = True
             return
         if ch.isdigit():
-            self._params[-1] += ch
+            if len(self._params[-1]) < self._MAX_PARAM_LEN:
+                self._params[-1] += ch
             return
         if ch == ";":
-            self._params.append("")
+            if len(self._params) < self._MAX_PARAMS:
+                self._params.append("")
             return
         if 0x40 <= byte <= 0x7E:
             self._dispatch_csi(ch)
@@ -113,11 +133,20 @@ class Parser:
     def _param(self, idx: int, default: int) -> int:
         if idx >= len(self._params) or not self._params[idx]:
             return default
-        return int(self._params[idx])
+        try:
+            return int(self._params[idx])
+        except ValueError:
+            return default
+
+    # DEC private modes acted on so far: 47/1047/1049 (alternate screen buffer).
+    # Others (bracketed paste 2004, mouse 1000+, sync output 2026, etc.) are
+    # recognized (don't fall through to the public dispatcher) but not yet acted on.
+    _ALT_SCREEN_MODES = frozenset({47, 1047, 1049})
 
     def _dispatch_csi(self, final: str) -> None:
         if self._private:
-            return  # DEC private modes (DECSET/DECRST) recognized, not yet acted on
+            self._dispatch_private_mode(final)
+            return
         if final == "A":
             self.sink.cursor_up(self._param(0, 1))
         elif final == "B":
@@ -133,9 +162,25 @@ class Parser:
         elif final == "K":
             self.sink.erase_in_line(self._param(0, 0))
         elif final == "m":
-            params = [int(p) if p else 0 for p in self._params]
+            params = []
+            for p in self._params:
+                try:
+                    params.append(int(p) if p else 0)
+                except ValueError:
+                    params.append(0)
             self.sink.sgr(params)
         # else: not yet implemented, silently ignored
+
+    def _dispatch_private_mode(self, final: str) -> None:
+        if final not in ("h", "l"):
+            return  # only DECSET/DECRST handled so far
+        enable = final == "h"
+        for raw in self._params:
+            if raw and int(raw) in self._ALT_SCREEN_MODES:
+                if enable:
+                    self.sink.enter_alt_screen()
+                else:
+                    self.sink.exit_alt_screen()
 
     # --- OSC: buffer until ST (ESC \) or BEL, contents discarded for now ---
 

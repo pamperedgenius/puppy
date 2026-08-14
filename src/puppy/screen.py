@@ -28,6 +28,18 @@ class Screen:
         self.cursor_col = 0
         self._sgr: dict = self._default_sgr()
         self.grid: list[list[Cell]] = self._blank_grid(rows, cols)
+        # DECSTBM scroll region (0-indexed, inclusive). Full screen until CSI r sets
+        # a narrower one (not implemented yet) -- kept as real fields now so
+        # linefeed/index/reverse_index don't need reworking when DECSTBM lands.
+        self.scroll_top = 0
+        self.scroll_bottom = rows - 1
+        # DECSC/DECRC (ESC 7/8) cursor save slot -- separate from the alt-screen's
+        # own implicit save/restore below, matching real terminal behavior.
+        self._dec_saved_cursor: tuple[int, int] | None = None
+        # Alternate screen buffer (DECSET 47/1047/1049), used by vim/less/htop etc.
+        self._alt_active = False
+        self._saved_main_grid: list[list[Cell]] | None = None
+        self._saved_main_cursor: tuple[int, int] = (0, 0)
 
     @staticmethod
     def _default_sgr() -> dict:
@@ -37,15 +49,52 @@ class Screen:
     def _blank_grid(rows: int, cols: int) -> list[list[Cell]]:
         return [[Cell() for _ in range(cols)] for _ in range(rows)]
 
-    def resize(self, rows: int, cols: int) -> None:
+    def _resized_grid(self, old_grid: list[list[Cell]], rows: int, cols: int) -> list[list[Cell]]:
         new_grid = self._blank_grid(rows, cols)
-        for r in range(min(rows, self.rows)):
-            for c in range(min(cols, self.cols)):
-                new_grid[r][c] = self.grid[r][c]
-        self.grid = new_grid
+        for r in range(min(rows, len(old_grid))):
+            for c in range(min(cols, len(old_grid[r]))):
+                new_grid[r][c] = old_grid[r][c]
+        return new_grid
+
+    def resize(self, rows: int, cols: int) -> None:
+        self.grid = self._resized_grid(self.grid, rows, cols)
+        if self._saved_main_grid is not None:
+            self._saved_main_grid = self._resized_grid(self._saved_main_grid, rows, cols)
         self.rows, self.cols = rows, cols
+        self.scroll_top = 0
+        self.scroll_bottom = rows - 1
         self.cursor_row = min(self.cursor_row, rows - 1)
         self.cursor_col = min(self.cursor_col, cols - 1)
+
+    # --- cursor save/restore (DECSC/DECRC, ESC 7/8) ---
+
+    def save_cursor(self) -> None:
+        self._dec_saved_cursor = (self.cursor_row, self.cursor_col)
+
+    def restore_cursor(self) -> None:
+        if self._dec_saved_cursor is not None:
+            self.cursor_row, self.cursor_col = self._dec_saved_cursor
+
+    # --- alternate screen buffer (DECSET 47/1047/1049) ---
+
+    def enter_alt_screen(self) -> None:
+        if self._alt_active:
+            return
+        self._alt_active = True
+        self._saved_main_grid = self.grid
+        self._saved_main_cursor = (self.cursor_row, self.cursor_col)
+        self.grid = self._blank_grid(self.rows, self.cols)
+        self.cursor_row = 0
+        self.cursor_col = 0
+
+    def exit_alt_screen(self) -> None:
+        if not self._alt_active:
+            return
+        self._alt_active = False
+        assert self._saved_main_grid is not None
+        self.grid = self._saved_main_grid
+        self._saved_main_grid = None
+        self.cursor_row, self.cursor_col = self._saved_main_cursor
 
     # --- writing text ---
 
@@ -57,11 +106,31 @@ class Screen:
         self.cursor_col += 1
 
     def linefeed(self) -> None:
-        if self.cursor_row == self.rows - 1:
-            self.grid.pop(0)
-            self.grid.append([Cell() for _ in range(self.cols)])
-        else:
+        if self.cursor_row == self.scroll_bottom:
+            self._scroll_region_up(1)
+        elif self.cursor_row < self.rows - 1:
             self.cursor_row += 1
+
+    def index(self) -> None:
+        """ESC D (IND): same cursor movement as linefeed, without a carriage return."""
+        self.linefeed()
+
+    def reverse_index(self) -> None:
+        """ESC M (RI): move up, scrolling the region down if already at its top."""
+        if self.cursor_row == self.scroll_top:
+            self._scroll_region_down(1)
+        elif self.cursor_row > 0:
+            self.cursor_row -= 1
+
+    def _scroll_region_up(self, n: int = 1) -> None:
+        for _ in range(n):
+            del self.grid[self.scroll_top]
+            self.grid.insert(self.scroll_bottom, [Cell() for _ in range(self.cols)])
+
+    def _scroll_region_down(self, n: int = 1) -> None:
+        for _ in range(n):
+            del self.grid[self.scroll_bottom]
+            self.grid.insert(self.scroll_top, [Cell() for _ in range(self.cols)])
 
     def carriage_return(self) -> None:
         self.cursor_col = 0

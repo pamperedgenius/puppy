@@ -13,12 +13,45 @@ Background research (protocol specs, terminfo.dev, kitty C-source file map, laye
 build plan): `~/Documents/python-terminal-emulator-research.md`. That file doesn't
 change often — this one does.
 
+**Repo**: https://github.com/pamperedgenius/puppy (public, matches the visibility used
+for other original from-scratch tools like `bane`/`python-sprint`/`startpage-for-me` —
+forks of others' code are the ones kept private). **Workflow rule: push to GitHub at the
+end of every work session** (not mid-session) so progress is never sitting only on this
+machine — a placeholder push happened 2026-08-13 even though the session wasn't over,
+per explicit request.
+
 ## Current status (2026-08-13)
 
-Just started. First slice exists: PTY spawn, a byte-level VT/ANSI parser, and an
-in-memory screen buffer (grid of cells with cursor + basic SGR attributes). No rendering
-yet — see "Deferred decision" below. Not yet tested against a live PTY in this
-environment (see Next steps).
+First slice done and pushed: `PtySession` (real PTY spawn/read/write/resize), `Parser`
+(byte-level VT100/ECMA-48 state machine), `Screen` (grid of cells, cursor, basic SGR).
+Since the initial push, added: alternate screen buffer (DECSET 47/1047/1049 — used by
+vim/less/htop), DECSC/DECRC cursor save-restore (ESC 7/8), IND/RI (ESC D/M) with
+scroll-region-aware `linefeed`/`reverse_index` (the region itself defaults to the full
+screen — DECSTBM/`CSI r` to actually narrow it is still on the milestone list, but the
+scroll-aware plumbing is now in place so that won't require reworking `linefeed` again).
+25 unit tests passing. Also ran one ad hoc end-to-end smoke test in this environment —
+spawned a real `/bin/sh` via `PtySession`, piped output through `Parser` into `Screen`,
+confirmed real shell output flows through the whole pipeline correctly. That test also
+showed the expected mess from *local echo* duplicating bytes (the shell echoes the typed
+command line **and** the command's own output both land on the same PTY master stream) —
+not a parser bug, just a reminder that `python -m puppy` (which runs the terminal in raw
+mode, no double-echo) is the real way to validate this, not ad hoc scripting. No
+rendering yet — see the deferred decision below. `python -m puppy` itself has **not**
+been live-tested yet (needs a real interactive terminal window, see Next steps).
+
+**Security fix (2026-08-13, caught by an automated commit review, not by us):** `_csi()`
+accumulated CSI parameter digits with no length cap, and `_param()`/the SGR handler ran
+bare `int()` on the result. A single crafted escape sequence with a long enough digit
+run (e.g. from `cat`-ing an untrusted file, or a compromised remote program's output —
+a classic terminal-emulator attack surface) would exceed Python's int-string-conversion
+digit limit and raise an uncaught `ValueError`, crashing the whole parse loop on one
+byte stream. Fixed by capping param length (7 digits) and param count (32) at
+accumulation time, plus wrapping the `int()` calls in `try/except ValueError` as
+defense in depth. Two regression tests added (`test_huge_csi_param_digit_run_does_not_
+crash`, `test_huge_csi_param_count_does_not_crash`). **Lesson for future milestones**:
+any place that accumulates attacker-controlled bytes into a buffer before parsing
+(OSC content parsing, once that's implemented, is the next one that will need this)
+needs an explicit cap from the start, not added after the fact.
 
 ## Architecture decisions log
 
@@ -63,12 +96,20 @@ with the date when something is confirmed working (not just "code exists").
       stderr so it doesn't corrupt the live session)
 - [x] Unit tests for parser (cursor movement, SGR parsing, ED/EL) and screen
       (grid mutation, resize) — pure logic, no real PTY needed, run in CI/sandbox
+- [x] CSI parameter accumulation hardened against the differential-DoS class
+      (unbounded digit/param-count growth -> uncaught `ValueError`) — 2026-08-13
+- [x] Alternate screen buffer (DECSET 47/1047/1049) + DECSC/DECRC (ESC 7/8) +
+      IND/RI (ESC D/M) with scroll-region-aware linefeed — 2026-08-13, unit-tested
 - [ ] **Next up**: live-test `python -m puppy` in a real terminal window — spawn a
       shell, run a few commands (`ls`, `printf` with colors, `vim` briefly), confirm
       the mirrored output looks like a normal shell and the dump command's grid
       matches. This needs an actual terminal window, can't be done headlessly.
-- [ ] Alternate screen buffer (mode 1049) + scrollback
-- [ ] Scroll regions (DECSTBM), insert/delete line/char
+- [ ] Scrollback (a real history buffer for lines scrolled off the main screen —
+      distinct from the alt-screen buffer above, not started)
+- [ ] DECSTBM (`CSI r`) to actually narrow the scroll region — the region-aware
+      linefeed/index/reverse_index plumbing already exists, this just needs the
+      CSI dispatch + clamping cursor into the new region on set
+- [ ] Insert/delete line/char (IL/DL/ICH/DCH — `CSI L/M/@/P`)
 - [ ] 256-color and 24-bit truecolor SGR (currently only basic 16-color SGR)
 - [ ] Bracketed paste (2004), focus reporting (1004), synchronized output (2026)
 - [ ] Mouse protocols (1000/1002/1003/1006 SGR)
@@ -105,7 +146,12 @@ puppy/
    this needs a real interactive session, not something to run headlessly. Per the
    live-window-testing rule, don't repeatedly spawn/close windows to test this —
    the user should run it and report back, or explicitly hand over a window to test in.
-2. Once pass-through is confirmed sound, start on alternate-screen + scroll regions
-   (next unchecked milestone) — still no rendering needed.
-3. Revisit the windowing-toolkit decision once the text-only model feels solid enough
+   **Not blocking further headless work** — DECSTBM/insert-delete-line/256-color can
+   all proceed in parallel, same as alt-screen did.
+2. DECSTBM (`CSI r`) next — narrows `scroll_top`/`scroll_bottom`, which `linefeed`/
+   `index`/`reverse_index` already respect, so this should be a small, self-contained
+   change (parse `CSI Pt;Pb r`, clamp cursor into the new region per DEC spec).
+3. Then insert/delete line/char, then 256-color/truecolor SGR (currently only 16-color
+   SGR + a partial/untested 38:5:/38:2: path exists in `Screen.sgr`).
+4. Revisit the windowing-toolkit decision once the text-only model feels solid enough
    that rendering is the next real thing blocking progress.
