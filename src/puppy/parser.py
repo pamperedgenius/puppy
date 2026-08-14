@@ -120,7 +120,12 @@ class Parser:
             if len(self._params[-1]) < self._MAX_PARAM_LEN:
                 self._params[-1] += ch
             return
-        if ch == ";":
+        if ch in (";", ":"):
+            # ':' is the ITU T.416 sub-parameter separator (used by modern truecolor
+            # SGR like `38:2:r:g:b`, which is what kitty itself emits). Flattening it
+            # into the same params list as ';' is correct for the sequences Screen.sgr
+            # actually parses (38/48 followed by mode then color components in order);
+            # it only breaks for the rarer 6-field `38:2:<colorspace>:r:g:b` form.
             if len(self._params) < self._MAX_PARAMS:
                 self._params.append("")
             return
@@ -161,6 +166,16 @@ class Parser:
             self.sink.erase_in_display(self._param(0, 0))
         elif final == "K":
             self.sink.erase_in_line(self._param(0, 0))
+        elif final == "r":
+            self.sink.set_scroll_region(self._param(0, 0), self._param(1, 0))
+        elif final == "L":
+            self.sink.insert_lines(self._param(0, 1))
+        elif final == "M":
+            self.sink.delete_lines(self._param(0, 1))
+        elif final == "@":
+            self.sink.insert_chars(self._param(0, 1))
+        elif final == "P":
+            self.sink.delete_chars(self._param(0, 1))
         elif final == "m":
             params = []
             for p in self._params:

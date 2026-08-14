@@ -123,14 +123,62 @@ class Screen:
             self.cursor_row -= 1
 
     def _scroll_region_up(self, n: int = 1) -> None:
-        for _ in range(n):
-            del self.grid[self.scroll_top]
-            self.grid.insert(self.scroll_bottom, [Cell() for _ in range(self.cols)])
+        self._shift_up(self.scroll_top, self.scroll_bottom, n)
 
     def _scroll_region_down(self, n: int = 1) -> None:
+        self._shift_down(self.scroll_top, self.scroll_bottom, n)
+
+    def _shift_up(self, from_row: int, to_row: int, n: int = 1) -> None:
+        # Lines from_row..to_row move up by n, blanks fill in at to_row. n is
+        # clamped to the region height -- params come straight from the parser
+        # (attacker-controlled in principle), and an uncapped loop here would be a
+        # real hang, not just a crash, unlike the plain int-parsing DoS fixed earlier.
+        n = min(max(n, 0), to_row - from_row + 1)
         for _ in range(n):
-            del self.grid[self.scroll_bottom]
-            self.grid.insert(self.scroll_top, [Cell() for _ in range(self.cols)])
+            del self.grid[from_row]
+            self.grid.insert(to_row, [Cell() for _ in range(self.cols)])
+
+    def _shift_down(self, from_row: int, to_row: int, n: int = 1) -> None:
+        n = min(max(n, 0), to_row - from_row + 1)
+        for _ in range(n):
+            del self.grid[to_row]
+            self.grid.insert(from_row, [Cell() for _ in range(self.cols)])
+
+    def set_scroll_region(self, top: int = 0, bottom: int = 0) -> None:
+        """DECSTBM (CSI Pt;Pb r). top/bottom are 1-indexed; 0 means "unspecified"."""
+        t = top - 1 if top > 0 else 0
+        b = bottom - 1 if bottom > 0 else self.rows - 1
+        if t < 0 or b >= self.rows or t >= b:
+            return  # invalid region, ignored per real terminal behavior
+        self.scroll_top = t
+        self.scroll_bottom = b
+        self.cursor_row = 0
+        self.cursor_col = 0
+
+    def insert_lines(self, n: int = 1) -> None:
+        """IL (CSI Pn L): insert n blank lines at the cursor row, within the region."""
+        if self.scroll_top <= self.cursor_row <= self.scroll_bottom:
+            self._shift_down(self.cursor_row, self.scroll_bottom, n)
+
+    def delete_lines(self, n: int = 1) -> None:
+        """DL (CSI Pn M): delete n lines at the cursor row, within the region."""
+        if self.scroll_top <= self.cursor_row <= self.scroll_bottom:
+            self._shift_up(self.cursor_row, self.scroll_bottom, n)
+
+    def insert_chars(self, n: int = 1) -> None:
+        """ICH (CSI Pn @): insert n blank cells at the cursor, within the line."""
+        row = self.grid[self.cursor_row]
+        n = min(max(n, 0), self.cols - self.cursor_col)
+        if n == 0:
+            return
+        row[self.cursor_col:self.cursor_col] = [Cell() for _ in range(n)]
+        del row[self.cols:]
+
+    def delete_chars(self, n: int = 1) -> None:
+        """DCH (CSI Pn P): delete n cells at the cursor, within the line."""
+        row = self.grid[self.cursor_row]
+        del row[self.cursor_col:self.cursor_col + max(n, 0)]
+        row.extend(Cell() for _ in range(self.cols - len(row)))
 
     def carriage_return(self) -> None:
         self.cursor_col = 0

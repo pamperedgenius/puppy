@@ -90,6 +90,34 @@ def test_ind_moves_down_like_linefeed():
     assert screen.grid[1][0].char == "x"
 
 
+def test_decstbm_narrows_scroll_region():
+    screen = _run(b"\x1b[2;4r")
+    assert (screen.scroll_top, screen.scroll_bottom) == (1, 3)
+
+
+def test_csi_L_inserts_line_at_cursor():
+    screen = _run(b"a\r\nb\r\n" + b"\x1b[1;1H" + b"\x1b[L")
+    assert screen.grid[0][0].char == " "
+    assert screen.grid[1][0].char == "a"
+
+
+def test_csi_at_inserts_chars_and_csi_P_deletes_chars():
+    screen = _run(b"abcde" + b"\x1b[1;2H" + b"\x1b[1@")
+    assert [c.char for c in screen.grid[0][:5]] == ["a", " ", "b", "c", "d"]
+
+
+def test_sgr_256_color_semicolon_form():
+    screen = _run(b"\x1b[38;5;196mx")
+    assert screen.grid[0][0].fg == 196
+
+
+def test_sgr_truecolor_colon_form():
+    # ':' is the ITU sub-parameter separator kitty and most modern terminals emit
+    # for truecolor SGR -- must not get concatenated into the wrong parameter.
+    screen = _run(b"\x1b[38:2:255:0:0mx")
+    assert screen.grid[0][0].fg == (255, 0, 0)
+
+
 def test_osc_sequence_terminated_by_bel_is_skipped():
     screen = _run(b"\x1b]0;title\x07ok")
     assert screen.dump_text().splitlines()[0] == "ok"
