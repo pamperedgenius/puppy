@@ -34,10 +34,18 @@ which surfaced a real parser gap while verifying it: the CSI state machine never
 emit for truecolor, e.g. `38:2:255:0:0`), so colon digits were silently concatenated
 onto the wrong parameter, corrupting color parsing. Fixed by treating `:` the same as
 `;` at accumulation time (correct for every sequence `Screen.sgr` actually parses; the
-rarer 6-field `38:2:<colorspace>:r:g:b` form is a known remaining gap). 43 unit tests
-passing, including hang-safety tests (`insert_lines`/`delete_chars` with a huge count
-must clamp to the region/line size, not loop attacker-controlled-times — same DoS class
-as the CSI-param fix below, caught proactively this time instead of by review). Also ran
+rarer 6-field `38:2:<colorspace>:r:g:b` form is a known remaining gap). Also added
+scrollback: a `deque(maxlen=2000)` history that only captures lines scrolled off the
+*real* top of the *main* screen (not alt-screen scrolling, not a narrowed-DECSTBM
+region's internal scrolling, not DL) — matches real terminal behavior on what counts as
+"history". `CSI 3 J` (what `clear` actually sends) wipes it, `CSI 2 J` doesn't. 49 unit
+tests passing, including hang-safety tests (`insert_lines`/`delete_chars` with a huge
+count must clamp to the region/line size, not loop attacker-controlled-times — same DoS
+class as the CSI-param fix below, caught proactively this time instead of by review).
+`python -m puppy` was spawned in a live xfce4-terminal window (2026-08-15) and the user
+confirmed it looked fine ("everything is good") — this counts as the live-test milestone
+being done, even though nothing was independently screenshotted (no way to see a live GUI
+window from here). Also ran
 one ad hoc end-to-end smoke test in this environment —
 spawned a real `/bin/sh` via `PtySession`, piped output through `Parser` into `Screen`,
 confirmed real shell output flows through the whole pipeline correctly. That test also
@@ -113,15 +121,16 @@ with the date when something is confirmed working (not just "code exists").
       bounds (top>=bottom, out-of-range), resets cursor to home on set — 2026-08-15
 - [x] Insert/delete line/char (IL/DL/ICH/DCH — `CSI L/M/@/P`), region-aware for
       line ops, clamped against huge counts — 2026-08-15, unit-tested
-- [ ] **Next up**: live-test `python -m puppy` in a real terminal window — spawn a
-      shell, run a few commands (`ls`, `printf` with colors, `vim` briefly), confirm
-      the mirrored output looks like a normal shell and the dump command's grid
-      matches. This needs an actual terminal window, can't be done headlessly.
+- [x] Live-test `python -m puppy` in a real terminal window — spawned 2026-08-15,
+      user confirmed it looked fine. Not independently screenshotted/verified in
+      detail (no way to see a live GUI window from here) — if anything subtle looks
+      wrong later (colors, cursor drift, wrapping), this is the first place to doubt.
 - [x] 256-color and 24-bit truecolor SGR (`38/48;5;n`, `38/48;2;r;g;b`, both `;`-
       and `:`-separated forms) — 2026-08-15, unit-tested; fixed a real `:`
       sub-parameter parsing gap along the way (see Current status)
-- [ ] Scrollback (a real history buffer for lines scrolled off the main screen —
-      distinct from the alt-screen buffer above, not started)
+- [x] Scrollback — `deque(maxlen=2000)`, only real top-of-main-screen scrolls
+      captured (not alt-screen, not narrowed-DECSTBM regions, not DL), `CSI 3 J`
+      clears it — 2026-08-15, unit-tested
 - [ ] Bracketed paste (2004), focus reporting (1004), synchronized output (2026)
 - [ ] Mouse protocols (1000/1002/1003/1006 SGR)
 - [ ] OSC family: title (0/1/2), palette (4/10/11), clipboard (52), hyperlinks (8)
@@ -153,15 +162,21 @@ puppy/
 
 ## Next steps (pick up here)
 
-1. Live-test `python -m puppy` in an actual terminal window (xfterm/OdyTTY/etc.) —
-   this needs a real interactive session, not something to run headlessly. Per the
-   live-window-testing rule, don't repeatedly spawn/close windows to test this —
-   the user should run it and report back, or explicitly hand over a window to test in.
-   **Not blocking further headless work**, same as before.
-2. Scrollback next (a real history ring buffer, separate from the alt-screen buffer),
-   then bracketed paste/focus-reporting/synchronized-output (mode set/reset tracking
-   only for now — these don't change rendering yet, just need the modes recognized;
-   synchronized output specifically should batch a burst of writes into one `Screen`
-   update rather than applying them one byte at a time).
+1. Bracketed paste (2004) / focus reporting (1004) / synchronized output (2026) —
+   mode set/reset tracking only for now, these don't change rendering yet, just need
+   the DECSET/DECRST modes recognized (extend `Parser._dispatch_private_mode`'s
+   pattern, same as alt-screen). Synchronized output specifically should end up
+   batching a burst of writes into one `Screen` update rather than applying byte by
+   byte, once there's a renderer to actually batch updates for.
+2. Then mouse protocols (1000/1002/1003/1006 SGR) and the OSC family (title,
+   palette, clipboard, hyperlinks) — OSC content is currently fully discarded by
+   the parser (`_finish_osc`), so this needs real buffering with a length cap from
+   the start (see the security-fix lesson in Current status/2026-08-13).
+3. Terminfo entry next, so real programs (vim, ncurses apps) detect what puppy
+   actually supports instead of guessing from `$TERM`.
+4. Then **decide the rendering/windowing toolkit** (pywayland/GTK4/SDL2, still
+   deferred) — the text-only model is getting substantial enough that rendering is
+   close to being the next real thing blocking progress, not scrollback/protocol
+   work anymore.
 4. Revisit the windowing-toolkit decision once the text-only model feels solid enough
    that rendering is the next real thing blocking progress.

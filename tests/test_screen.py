@@ -200,3 +200,57 @@ def test_sgr_truncated_extended_color_does_not_crash():
     s.sgr([38, 5])  # missing the color index -- malformed, must not raise
     s.put_char("a")
     assert s.grid[0][0].char == "a"
+
+
+def test_top_of_screen_scroll_adds_to_scrollback():
+    s = Screen(rows=2, cols=3)
+    s.put_char("a")
+    s.cursor_position(2, 1)
+    s.linefeed()  # at scroll_bottom, top of region is row 0 -> scrolls into history
+    assert s.scrollback_text() == "a"
+
+
+def test_alt_screen_scroll_does_not_add_to_scrollback():
+    s = Screen(rows=2, cols=3)
+    s.enter_alt_screen()
+    s.put_char("a")
+    s.cursor_position(2, 1)
+    s.linefeed()
+    assert len(s.scrollback) == 0
+
+
+def test_narrowed_scroll_region_does_not_add_to_scrollback():
+    s = Screen(rows=4, cols=3)
+    s.set_scroll_region(2, 4)  # top of region is row 1, not the screen top
+    s.cursor_position(4, 1)
+    s.put_char("a")
+    s.cursor_position(4, 1)
+    s.linefeed()
+    assert len(s.scrollback) == 0
+
+
+def test_delete_lines_does_not_add_to_scrollback():
+    s = Screen(rows=3, cols=3)
+    s.put_char("a")
+    s.delete_lines(1)
+    assert len(s.scrollback) == 0
+
+
+def test_scrollback_is_bounded_by_limit():
+    s = Screen(rows=2, cols=3, scrollback_limit=3)
+    for i in range(10):
+        s.cursor_position(2, 1)
+        s.linefeed()
+    assert len(s.scrollback) == 3
+
+
+def test_erase_in_display_mode_3_clears_scrollback_mode_2_does_not():
+    s = Screen(rows=2, cols=3)
+    s.put_char("a")
+    s.cursor_position(2, 1)
+    s.linefeed()
+    assert len(s.scrollback) == 1
+    s.erase_in_display(2)
+    assert len(s.scrollback) == 1  # mode 2 leaves scrollback alone
+    s.erase_in_display(3)
+    assert len(s.scrollback) == 0
