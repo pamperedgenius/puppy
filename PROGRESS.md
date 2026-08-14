@@ -73,10 +73,18 @@ fixed properly in the kitty-source verification pass above, not left as a gap). 
 added scrollback: a `deque(maxlen=2000)` history that only captures lines scrolled off
 the *real* top of the *main* screen (not alt-screen scrolling, not a narrowed-DECSTBM
 region's internal scrolling, not DL) — matches real terminal behavior on what counts as
-"history". `CSI 3 J` (what `clear` actually sends) wipes it, `CSI 2 J` doesn't. 55 unit
-tests passing, including hang-safety tests (`insert_lines`/`delete_chars` with a huge
-count must clamp to the region/line size, not loop attacker-controlled-times — same DoS
-class as the CSI-param fix below, caught proactively this time instead of by review).
+"history". `CSI 3 J` (what `clear` actually sends) wipes it, `CSI 2 J` doesn't. Also
+added generic DEC private-mode tracking: `Screen.private_modes` (a plain `set[int]`,
+same idea as kitty's own `SIMPLE_MODE` macro) records the on/off state of *any* private
+mode the parser sees, with `bracketed_paste`/`focus_tracking`/`sync_output_pending`
+convenience properties for the three specifically named in the milestone list (2004,
+1004, 2026). Alt-screen modes (47/1047/1049) stay a special case in `Parser` handled
+before the generic fallback, so they don't also land in `private_modes`. No behavior
+beyond state tracking yet — synchronized output specifically still needs an actual
+renderer to batch updates for, which doesn't exist. 63 unit tests passing, including
+hang-safety tests (`insert_lines`/`delete_chars` with a huge count must clamp to the
+region/line size, not loop attacker-controlled-times — same DoS class as the CSI-param
+fix below, caught proactively this time instead of by review).
 `python -m puppy` was spawned in a live xfce4-terminal window (2026-08-15) and the user
 confirmed it looked fine ("everything is good") — this counts as the live-test milestone
 being done, even though nothing was independently screenshotted (no way to see a live GUI
@@ -169,7 +177,10 @@ with the date when something is confirmed working (not just "code exists").
       clears it — 2026-08-15, unit-tested
 - [x] Kitty-source verification pass — DECSTBM clamping, IL/DL carriage-return,
       alt-screen 47/1047-vs-1049 cursor handling — 2026-08-15, see above, unit-tested
-- [ ] Bracketed paste (2004), focus reporting (1004), synchronized output (2026)
+- [x] Bracketed paste (2004), focus reporting (1004), synchronized output (2026) —
+      2026-08-15, state tracking only (`Screen.private_modes`, generic for any DEC
+      private mode) — none of these change behavior yet, sync output specifically
+      needs a real renderer to batch updates for, see Current status
 - [ ] Mouse protocols (1000/1002/1003/1006 SGR)
 - [ ] OSC family: title (0/1/2), palette (4/10/11), clipboard (52), hyperlinks (8)
 - [ ] Terminfo entry so real programs (vim, ncurses apps) detect capabilities correctly
@@ -200,21 +211,13 @@ puppy/
 
 ## Next steps (pick up here)
 
-1. Bracketed paste (2004) / focus reporting (1004) / synchronized output (2026) —
-   mode set/reset tracking only for now, these don't change rendering yet, just need
-   the DECSET/DECRST modes recognized (extend `Parser._dispatch_private_mode`'s
-   pattern, same as alt-screen). Synchronized output specifically should end up
-   batching a burst of writes into one `Screen` update rather than applying byte by
-   byte, once there's a renderer to actually batch updates for.
-2. Then mouse protocols (1000/1002/1003/1006 SGR) and the OSC family (title,
-   palette, clipboard, hyperlinks) — OSC content is currently fully discarded by
-   the parser (`_finish_osc`), so this needs real buffering with a length cap from
-   the start (see the security-fix lesson in Current status/2026-08-13).
-3. Terminfo entry next, so real programs (vim, ncurses apps) detect what puppy
+1. Mouse protocols (1000/1002/1003/1006 SGR) and the OSC family (title, palette,
+   clipboard, hyperlinks) next — OSC content is currently fully discarded by the
+   parser (`_finish_osc`), so this needs real buffering with a length cap from the
+   start (see the security-fix lesson in Current status/2026-08-13).
+2. Terminfo entry next, so real programs (vim, ncurses apps) detect what puppy
    actually supports instead of guessing from `$TERM`.
-4. Then **decide the rendering/windowing toolkit** (pywayland/GTK4/SDL2, still
+3. Then **decide the rendering/windowing toolkit** (pywayland/GTK4/SDL2, still
    deferred) — the text-only model is getting substantial enough that rendering is
    close to being the next real thing blocking progress, not scrollback/protocol
    work anymore.
-4. Revisit the windowing-toolkit decision once the text-only model feels solid enough
-   that rendering is the next real thing blocking progress.

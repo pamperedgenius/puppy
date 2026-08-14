@@ -49,6 +49,31 @@ class Screen:
         # Alternate screen buffer (DECSET 47/1047/1049), used by vim/less/htop etc.
         self._alt_active = False
         self._saved_main_grid: list[list[Cell]] | None = None
+        # Generic DEC private mode tracking (bracketed paste 2004, focus reporting
+        # 1004, synchronized output 2026, mouse modes, etc.) -- matches how kitty's
+        # own SIMPLE_MODE macro just stores a bool per mode number. Modes that need
+        # actual behavior (alt-screen) are handled as special cases in Parser before
+        # falling through to this generic set; everything else is "recognized, state
+        # tracked, no behavior yet" until something downstream needs it.
+        self.private_modes: set[int] = set()
+
+    def set_private_mode(self, mode: int, enabled: bool) -> None:
+        if enabled:
+            self.private_modes.add(mode)
+        else:
+            self.private_modes.discard(mode)
+
+    @property
+    def bracketed_paste(self) -> bool:
+        return 2004 in self.private_modes
+
+    @property
+    def focus_tracking(self) -> bool:
+        return 1004 in self.private_modes
+
+    @property
+    def sync_output_pending(self) -> bool:
+        return 2026 in self.private_modes
 
     @staticmethod
     def _default_sgr() -> dict:

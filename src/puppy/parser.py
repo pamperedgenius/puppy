@@ -152,9 +152,10 @@ class Parser:
         except ValueError:
             return default
 
-    # DEC private modes acted on so far: 47/1047/1049 (alternate screen buffer).
-    # Others (bracketed paste 2004, mouse 1000+, sync output 2026, etc.) are
-    # recognized (don't fall through to the public dispatcher) but not yet acted on.
+    # 47/1047/1049 (alternate screen buffer) are the only private modes with real
+    # behavior wired up so far -- everything else DEC private (bracketed paste 2004,
+    # focus reporting 1004, sync output 2026, mouse 1000+, DECOM, DECAWM, ...) just
+    # gets its on/off state tracked generically via Screen.private_modes.
     _ALT_SCREEN_MODES = frozenset({47, 1047, 1049})
 
     def _dispatch_csi(self, final: str) -> None:
@@ -209,6 +210,12 @@ class Parser:
                     self.sink.enter_alt_screen(save_cursor)
                 else:
                     self.sink.exit_alt_screen(save_cursor)
+            else:
+                # Generic tracking for everything else (bracketed paste 2004, focus
+                # reporting 1004, synchronized output 2026, mouse modes, DECOM,
+                # DECAWM, ...) -- state recorded, no behavior wired up yet beyond
+                # what Screen.private_modes exposes.
+                self.sink.set_private_mode(mode, enable)
 
     # --- OSC: buffer until ST (ESC \) or BEL, contents discarded for now ---
 

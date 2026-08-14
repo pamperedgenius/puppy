@@ -287,3 +287,29 @@ def test_erase_in_display_mode_3_clears_scrollback_mode_2_does_not():
     assert len(s.scrollback) == 1  # mode 2 leaves scrollback alone
     s.erase_in_display(3)
     assert len(s.scrollback) == 0
+
+
+def test_private_mode_tracking_set_and_reset():
+    s = Screen()
+    assert s.bracketed_paste is False
+    s.set_private_mode(2004, True)
+    assert s.bracketed_paste is True
+    assert 2004 in s.private_modes
+    s.set_private_mode(2004, False)
+    assert s.bracketed_paste is False
+    assert 2004 not in s.private_modes
+
+
+def test_private_mode_convenience_properties():
+    s = Screen()
+    s.set_private_mode(1004, True)
+    s.set_private_mode(2026, True)
+    assert s.focus_tracking is True
+    assert s.sync_output_pending is True
+    assert s.bracketed_paste is False
+
+
+def test_private_mode_reset_of_unset_mode_is_a_noop():
+    s = Screen()
+    s.set_private_mode(9999, False)  # never set -- must not raise
+    assert 9999 not in s.private_modes

@@ -159,3 +159,34 @@ def test_carriage_return_and_linefeed():
     lines = screen.dump_text().splitlines()
     assert lines[0] == "ab"
     assert lines[1] == "cd"
+
+
+def test_bracketed_paste_mode_tracked():
+    screen = _run(b"\x1b[?2004h")
+    assert screen.bracketed_paste is True
+    Parser(screen).feed(b"\x1b[?2004l")
+    assert screen.bracketed_paste is False
+
+
+def test_focus_tracking_and_sync_output_modes_tracked():
+    screen = _run(b"\x1b[?1004h\x1b[?2026h")
+    assert screen.focus_tracking is True
+    assert screen.sync_output_pending is True
+
+
+def test_multiple_private_modes_in_one_sequence():
+    screen = _run(b"\x1b[?1004;2004;2026h")
+    assert screen.focus_tracking is True
+    assert screen.bracketed_paste is True
+    assert screen.sync_output_pending is True
+
+
+def test_unrecognized_private_mode_is_tracked_generically_not_crashed():
+    screen = _run(b"\x1b[?9999hok")
+    assert 9999 in screen.private_modes
+    assert screen.dump_text().splitlines()[0] == "ok"
+
+
+def test_alt_screen_mode_does_not_leak_into_generic_private_modes():
+    screen = _run(b"\x1b[?1049h")
+    assert 1049 not in screen.private_modes  # handled as a special case, not generic
