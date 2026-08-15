@@ -121,16 +121,20 @@ number, huge payload — both must truncate/reject, not hang or crash).
 `python -m puppy` was spawned in a live xfce4-terminal window (2026-08-15) and the user
 confirmed it looked fine ("everything is good") — this counts as the live-test milestone
 being done, even though nothing was independently screenshotted (no way to see a live GUI
-window from here). Also ran
-one ad hoc end-to-end smoke test in this environment —
-spawned a real `/bin/sh` via `PtySession`, piped output through `Parser` into `Screen`,
-confirmed real shell output flows through the whole pipeline correctly. That test also
-showed the expected mess from *local echo* duplicating bytes (the shell echoes the typed
-command line **and** the command's own output both land on the same PTY master stream) —
-not a parser bug, just a reminder that `python -m puppy` (which runs the terminal in raw
-mode, no double-echo) is the real way to validate this, not ad hoc scripting. No
-rendering yet — see the deferred decision below. `python -m puppy` itself has **not**
-been live-tested yet (needs a real interactive terminal window, see Next steps).
+window from here). Separately, an ad hoc end-to-end smoke test earlier in this
+environment — spawned a real `/bin/sh` via `PtySession`, piped output through `Parser`
+into `Screen`, confirmed real shell output flows through the whole pipeline correctly —
+also showed the expected mess from *local echo* duplicating bytes (the shell echoes the
+typed command line **and** the command's own output both land on the same PTY master
+stream); not a parser bug, just a reminder that `python -m puppy` (which runs the
+terminal in raw mode, no double-echo) is the real way to validate this, not ad hoc
+scripting. No rendering yet — see the deferred decision below.
+
+Also added a real terminfo entry (`terminfo/puppy.terminfo`) and confirmed it works: a
+real ncurses program (Python's own `curses.setupterm()`) accepts `TERM=puppy` and reports
+capabilities correctly, including `bce: 1` after that fix. Not yet wired as the default
+`TERM` for `python -m puppy`'s spawned shell — see the terminfo milestone entry below for
+why, and the next-live-test candidate.
 
 **Security fix (2026-08-13, caught by an automated commit review, not by us):** `_csi()`
 accumulated CSI parameter digits with no length cap, and `_param()`/the SGR handler ran
@@ -219,7 +223,20 @@ with the date when something is confirmed working (not just "code exists").
 - [x] OSC family: title (0/1/2), palette (4), default fg/bg (10/11), clipboard (52),
       hyperlinks (8) — 2026-08-15, unit-tested, includes DoS-safety tests (huge code
       number, huge payload) — see Current status for the buffering/cap design
-- [ ] Terminfo entry so real programs (vim, ncurses apps) detect capabilities correctly
+- [x] Terminfo entry — `terminfo/puppy.terminfo`, `use=xterm-256color` +
+      overrides only for genuine divergences (`smcup`/`rmcup` trimmed to the
+      mode-1049-only sequences puppy implements, `Tc`/`RGB` added for
+      truecolor). Compiles clean with `tic -x` (`scripts/install-terminfo.sh`,
+      installs to `~/.terminfo`, no sudo), and a real ncurses program
+      (`curses.setupterm()`) accepts `TERM=puppy` and reports `bce: 1`
+      correctly — 2026-08-15. Writing this honestly (checking whether `bce`
+      was really implemented before inheriting the claim from xterm-256color)
+      is what surfaced the back-color-erase gap, now fixed separately (see
+      the kitty-source verification section). **Not yet wired into
+      `PtySession`/`__main__.py`** — the proxy still inherits whatever `TERM`
+      the host shell already has, deliberately, so as not to change the
+      already-live-tested pass-through behavior without a fresh live check;
+      trying `TERM=puppy python -m puppy` is the next live-test candidate.
 - [ ] **Decide rendering/windowing toolkit**, build minimal glyph-grid renderer
 - [ ] Kitty keyboard protocol (CSI u) — needs the windowing toolkit decided first
 - [ ] Kitty graphics protocol (RGB/RGBA/PNG direct mode first)
@@ -240,6 +257,10 @@ puppy/
     pty_session.py       PtySession — spawn/read/write/resize a real PTY
     parser.py            Parser — byte-level VT/ANSI state machine
     screen.py             Screen, Cell — in-memory grid + cursor + SGR attrs
+  terminfo/
+    puppy.terminfo       terminfo source, use=xterm-256color + real overrides
+  scripts/
+    install-terminfo.sh  tic -x install to ~/.terminfo, no sudo
   tests/
     test_parser.py
     test_screen.py
@@ -247,15 +268,18 @@ puppy/
 
 ## Next steps (pick up here)
 
-1. Mouse *event generation* next (1000/1002/1003/1006 SGR reporting sequences sent
+1. Live-test `TERM=puppy python -m puppy` in a real terminal window — confirm a
+   real ncurses/vim session run *inside* puppy actually looks right with the new
+   terminfo entry active (colors, alt-screen enter/exit, scroll regions), not just
+   that `curses.setupterm()` accepts it headlessly. Needs an interactive session,
+   can't be done from here — same as the earlier live-test milestone.
+2. Mouse *event generation* next (1000/1002/1003/1006 SGR reporting sequences sent
    back to the child on real mouse input) — mode tracking already works via the
    generic private-mode system, this is the remaining "actually do something" half,
    and it needs `PtySession.write` wired to whatever eventually captures raw mouse
    events, so it may end up blocked on the windowing-toolkit decision below anyway.
-2. Terminfo entry next, so real programs (vim, ncurses apps) detect what puppy
-   actually supports instead of guessing from `$TERM`.
 3. Then **decide the rendering/windowing toolkit** (pywayland/GTK4/SDL2, still
    deferred) — the text-only model is substantial now (VT100 baseline, alt-screen,
    scrollback, 256/truecolor, OSC title/palette/clipboard/hyperlinks, private-mode
-   tracking), so rendering is genuinely the next thing blocking real usability, not
-   another protocol layer.
+   tracking, bce, a real terminfo entry), so rendering is genuinely the next thing
+   blocking real usability, not another protocol layer.

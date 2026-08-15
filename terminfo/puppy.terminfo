@@ -1,0 +1,37 @@
+# terminfo source for puppy, a from-scratch Python terminal emulator targeting
+# kitty-protocol parity (https://github.com/pamperedgenius/puppy).
+#
+# Deliberately inherits from xterm-256color (`use=`) rather than being written
+# fully from scratch. This is honest, not lazy: input-side capabilities (k* key
+# sequences) genuinely ARE xterm's right now, since puppy's PTY proxy is a pure
+# pass-through on the input side (see __main__.py) -- whatever the *host* terminal
+# actually sends when a key is pressed reaches the child unmodified, because
+# puppy doesn't yet intercept/regenerate key events itself (that's blocked on the
+# windowing-toolkit decision, see PROGRESS.md). Output-side capabilities that
+# puppy's Parser/Screen genuinely implement are inherited as-is when xterm-256color
+# already states them correctly (e.g. bce, ccc, initc -- all confirmed real via
+# source-level verification, see PROGRESS.md, not just assumed compatible) and only
+# overridden below where puppy's actual behavior differs from xterm's. Anything
+# neither implemented nor overridden is simply inherited and, per the parser's own
+# "not yet implemented, silently ignored" pattern, harmless if a program sends it:
+# puppy won't crash, it just won't act on it yet.
+#
+# Overrides below:
+# - rmcup/smcup: trimmed to exactly mode 1049 (cursor save/restore included, see
+#   PROGRESS.md's kitty-source verification pass) -- the xterm-inherited
+#   window-title-stack tail bytes (23/22;0;0t) aren't implemented by the parser
+#   (unhandled CSI ...t is silently ignored, harmless but pointless to advertise).
+# - Tc, RGB: 24-bit truecolor SGR (38/48;2;r;g;b, both ';' and ':' sub-parameter
+#   forms including the colorspace-id variant) -- Screen.sgr supports this fully,
+#   xterm-256color itself doesn't advertise it. Both extension-capability names are
+#   declared since different tools check different ones (tmux historically checks
+#   Tc, ncurses/newer tools check RGB) -- see terminfo.dev's truecolor-detection
+#   convention.
+#
+# Update this file's overrides whenever a milestone lands new Screen/Parser
+# capability that diverges from xterm-256color -- don't let it silently drift.
+
+puppy|puppy-256color|puppy terminal emulator (kitty-protocol parity WIP),
+	use=xterm-256color,
+	rmcup=\E[?1049l, smcup=\E[?1049h,
+	Tc, RGB,
