@@ -268,11 +268,41 @@ with the date when something is confirmed working (not just "code exists").
       the live Wayland session confirmed working, `bgra8unorm-srgb` surface
       format. Not yet a real terminal renderer — no font/glyph/cell-grid
       drawing yet, just "open a window, clear it to an exact color, prove it."
-- [ ] Glyph-grid renderer — take `Screen`'s cell grid and actually draw it:
-      HarfBuzz-shape + FreeType-rasterize into a glyph atlas texture, one
-      instanced-quad draw call per cell (fg/bg/bold/underline/reverse from
-      `Cell`, via `srgb_color`). This is the real next milestone — everything
-      built 2026-08-16 is plumbing/proof, not a usable renderer yet.
+- [x] Font shaping/rasterization layer — `src/puppy/render/font.py`,
+      `FontRenderer`: real HarfBuzz shaping + real FreeType rasterization,
+      glyph-id caching. **Real finding while building this**: cell width/height
+      must come from FreeType's *hinted* advance, not HarfBuzz's or FreeType's
+      unhinted/design-unit value — confirmed empirically (DejaVu Markup Nerd
+      Font, 16px: hinted=10.0px exactly, unhinted/design-unit=9.640625px,
+      consistent across 'M'/'i'/'W'/'.', confirming the font genuinely is
+      monospace and hinting is what snaps it to a clean integer pixel grid).
+      HarfBuzz's x_advance is deliberately NOT used for cell positioning —
+      cells sit at a fixed column*cell_width grid regardless, matching how a
+      monospace terminal grid actually works. Also fixed a real pitch-vs-width
+      bug before it shipped: FreeType's `bitmap.buffer` is `pitch*rows` bytes
+      (row-padded), not `width*rows` — naively treating it as tightly packed
+      would corrupt any glyph where pitch != width; fixed with a per-row copy,
+      locked in with a regression test. 2026-08-16, 8 tests, real font
+      (whatever fontconfig resolves for `monospace`, portable across
+      machines, no hardcoded path), real rasterized pixel data asserted
+      non-empty, not just "didn't crash."
+- [ ] Glyph-grid renderer proper — atlas packing (pack rasterized glyphs from
+      `FontRenderer` into a single GPU texture, track each glyph's UV rect) +
+      an instanced-quad WGSL draw (one instance per `Screen` cell) + fg/bg
+      compositing. Checked kitty's *real* current shader source for the
+      compositing formula before building this (`~/Projects/kitty/kitty/
+      shaders/cell.slang` + `alpha-blend.slang` — note: kitty moved from
+      `.glsl` to `.slang` shaders since whenever the research doc's file map
+      was written; `cell_fragment.glsl` doesn't exist in the current clone,
+      correcting that stale reference). Kitty's real shader is far more
+      sophisticated than a v1 needs — HSLuv-based automatic fg/bg contrast
+      override, cursor/selection/underline/strikethrough all composited via a
+      texture *array* atlas, gamma-adjustment modes. **v1 will only port the
+      core premultiplied "over" blend** (`alpha_blend_premul`, confirmed
+      exact formula from `alpha-blend.slang`: `result = over + under*(1-over.a)`)
+      for glyph-alpha-over-background — kitty's contrast-override/cursor/
+      selection sophistication is a deliberate, documented later milestone,
+      not part of this pass.
 - [ ] Key/mouse event capture wired to the live `Window` (GLFW callbacks ->
       `puppy.mouse.generate_mouse_report` for mouse, and the eventual kitty
       keyboard protocol encoder for keys) — `PtySession.write` is the
@@ -307,6 +337,7 @@ puppy/
       gpu.py                 GpuContext — canvas-agnostic adapter/device/surface + clear()
       color.py                sRGB<->linear conversion (GPU wants linear, themes are sRGB)
       window.py                live GLFW window wrapping GpuContext, lifecycle only
+      font.py                   FontRenderer — HarfBuzz shape + FreeType rasterize + cache
   terminfo/
     puppy.terminfo       terminfo source, use=xterm-256color + real overrides
   scripts/
@@ -315,6 +346,7 @@ puppy/
     test_parser.py
     test_screen.py
     test_mouse.py
+    test_render_font.py   real shaping/rasterization, portable (fc-match, no hardcoded font)
     test_render_color.py  pure sRGB/linear math, no GPU needed
     test_render_gpu.py     real wgpu + offscreen canvas, real pixel readback, skips if no adapter
 ```
@@ -325,14 +357,19 @@ puppy/
 dependencies live there, not in system Python. `pip install -e .` again if the venv
 is ever recreated (it's gitignored).
 
-1. Build the glyph-grid renderer: shape+rasterize `Screen`'s actual cell grid instead
-   of a flat clear color. Concretely: for each unique glyph encountered, HarfBuzz-shape
-   + FreeType-rasterize it into a shared texture atlas (cache by glyph id, not
-   re-rasterize every frame), then one instanced draw call renders every cell as a
-   textured quad using `Cell.fg`/`bg`/`bold`/`underline`/`reverse` (through
-   `srgb_color`, per the linear-vs-sRGB decision above — don't forget this on the
-   first real color that isn't a flat test clear). This is the actual "does puppy
-   look like a terminal yet" milestone.
+1. Atlas packing + the actual instanced-quad draw, now that shaping/rasterization
+   (`FontRenderer`) is done and tested: pack rasterized `GlyphBitmap`s into a single
+   GPU texture (track each glyph's UV rect, upload sub-regions via
+   `device.queue.write_texture` as new glyphs appear rather than re-uploading
+   everything), then one instanced draw call per frame renders every `Screen` cell as
+   a textured quad — glyph alpha sampled from the atlas, composited over `Cell.bg`
+   with `Cell.fg` using the confirmed premultiplied "over" formula from kitty's real
+   `alpha-blend.slang` (`result = over + under*(1-over.a)`), colors through
+   `srgb_color` per the linear-vs-sRGB decision above. **v1 scope**: just this core
+   blend — kitty's real `cell.slang` also does HSLuv-based automatic fg/bg contrast
+   override, cursor/selection compositing, and gamma-adjustment modes, all
+   deliberately deferred, not part of this pass (see the Milestones entry). This is
+   the actual "does puppy look like a terminal yet" milestone.
 2. Wire real key/mouse events into the live `Window`: GLFW's `set_key_callback`
    (press/repeat/release natively — exactly what the kitty keyboard protocol needs)
    and `set_mouse_button_callback`/`set_cursor_pos_callback`/`set_scroll_callback` for
