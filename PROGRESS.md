@@ -74,105 +74,101 @@ found because writing an honest terminfo entry (which has a `bce` capability fla
 forced the question "do we actually do this?" Worth treating protocol/terminfo work
 as a trigger for another verification pass, not just a one-time audit.
 
-## Current status (2026-08-15)
+## Current status (2026-08-16)
 
-First slice done and pushed: `PtySession` (real PTY spawn/read/write/resize), `Parser`
-(byte-level VT100/ECMA-48 state machine), `Screen` (grid of cells, cursor, basic SGR).
-Since the initial push, added: alternate screen buffer (DECSET 47/1047/1049 — used by
-vim/less/htop), DECSC/DECRC cursor save-restore (ESC 7/8), IND/RI (ESC D/M), DECSTBM
-(`CSI r`, narrows `scroll_top`/`scroll_bottom`, clamped/validated against garbage
-input), and insert/delete line/char (IL/DL/ICH/DCH — `CSI L/M/@/P`), all of it
-scroll-region-aware, and 256-color/truecolor SGR (`38/48;5;n` and `38/48;2;r;g;b`) —
-which surfaced a real parser gap while verifying it: the CSI state machine never handled
-`:` (the ITU T.416 sub-parameter separator that kitty and most modern terminals actually
-emit for truecolor, e.g. `38:2:255:0:0`), so colon digits were silently concatenated
-onto the wrong parameter, corrupting color parsing. Fixed by treating `:` the same as
-`;` at accumulation time (the rarer `38:2:<colorspace>:r:g:b` colorspace-id form was
-fixed properly in the kitty-source verification pass above, not left as a gap). Also
-added scrollback: a `deque(maxlen=2000)` history that only captures lines scrolled off
-the *real* top of the *main* screen (not alt-screen scrolling, not a narrowed-DECSTBM
-region's internal scrolling, not DL) — matches real terminal behavior on what counts as
-"history". `CSI 3 J` (what `clear` actually sends) wipes it, `CSI 2 J` doesn't. Also
-added generic DEC private-mode tracking: `Screen.private_modes` (a plain `set[int]`,
-same idea as kitty's own `SIMPLE_MODE` macro) records the on/off state of *any* private
-mode the parser sees, with `bracketed_paste`/`focus_tracking`/`sync_output_pending`
-convenience properties for the three specifically named in the milestone list (2004,
-1004, 2026). Alt-screen modes (47/1047/1049) stay a special case in `Parser` handled
-before the generic fallback, so they don't also land in `private_modes`. No behavior
-beyond state tracking yet — synchronized output specifically still needs an actual
-renderer to batch updates for, which doesn't exist. Also implemented the OSC family:
-title (`0`/`1`/`2`), 256-color palette overrides (`4`), default fg/bg (`10`/`11`),
-clipboard (`52`), and hyperlinks (`8`). OSC payloads used to be fully discarded
-(`_finish_osc` was a no-op); now they're buffered (capped at 8192 bytes — same DoS class
-as the CSI-param fix, capped from the start this time rather than added after the fact)
-and parsed into `Screen` fields (`window_title`/`icon_title`/`palette`/
-`default_fg_spec`/`default_bg_spec`/`clipboard`, plus a per-`Cell` `hyperlink` field that
-attaches like an SGR attribute to every char written while an OSC 8 link is active).
-Values are kept as raw spec strings (`"rgb:ff/00/00"`, `"#ff0080"`) rather than parsed
-into RGB tuples — that parsing belongs with whatever eventually renders them, not with
-the parser. All of `_safe_int` (a length-capped digit-only int parse, same guard class
-as CSI params) and the 8192-byte OSC buffer cap were sized defensively; kitty's own real
-OSC buffer limit wasn't found in a quick source search, so these are deliberately chosen
-bounds, not matched constants. 80 unit tests passing, including hang-safety tests
-(`insert_lines`/`delete_chars` with a huge count must clamp to the region/line size, not
-loop attacker-controlled-times — same DoS class as the CSI-param fix below, caught
-proactively this time instead of by review) and OSC-specific DoS tests (huge code
-number, huge payload — both must truncate/reject, not hang or crash).
-`python -m puppy` was spawned in a live xfce4-terminal window (2026-08-15) and the user
-confirmed it looked fine ("everything is good") — this counts as the live-test milestone
-being done, even though nothing was independently screenshotted (no way to see a live GUI
-window from here). Separately, an ad hoc end-to-end smoke test earlier in this
-environment — spawned a real `/bin/sh` via `PtySession`, piped output through `Parser`
-into `Screen`, confirmed real shell output flows through the whole pipeline correctly —
-also showed the expected mess from *local echo* duplicating bytes (the shell echoes the
-typed command line **and** the command's own output both land on the same PTY master
-stream); not a parser bug, just a reminder that `python -m puppy` (which runs the
-terminal in raw mode, no double-echo) is the real way to validate this, not ad hoc
-scripting. No rendering yet — see the deferred decision below.
+**Rendering has started.** The windowing/GPU toolkit decision (see the Architecture
+decisions log entry — `glfw`+`wgpu-py`/`rendercanvas`+`uharfbuzz`+`freetype-py`) is made
+and a real, working, tested GPU pipeline exists: `GpuContext` (canvas-agnostic
+adapter/device/surface setup) and a live `Window` (GLFW, wraps `GpuContext`). Verified
+against the real GPU and real display in this environment, not just imports: a real
+Wayland-native GLFW window, a real Vulkan adapter (`Intel(R) Graphics (ADL GT2)`), exact
+sRGB-byte-accurate pixel readback (exhaustively across all 256 values, via
+`rendercanvas.offscreen` — no visible window needed for this, real GPU + real numeric
+proof instead), and real HarfBuzz shaping + FreeType rasterization against the actual
+system font. 118 tests passing (up from 110), including 8 new render-layer tests that
+gracefully skip (not fail) under a Python environment that hasn't installed the render
+deps — **but real render work needs `source .venv/bin/activate` from now on**, see the
+Python-environment architecture decision entry. Still no actual glyph/cell-grid drawing —
+what exists today is "a window opens, GPU renders an exact color, font shaping produces
+real glyph data" — the next milestone is putting those three things together into an
+actual visible terminal grid.
 
-Also added a real terminfo entry (`terminfo/puppy.terminfo`) and confirmed it works: a
-real ncurses program (Python's own `curses.setupterm()`) accepts `TERM=puppy` and reports
-capabilities correctly, including `bce: 1` after that fix. Not yet wired as the default
-`TERM` for `python -m puppy`'s spawned shell — see the terminfo milestone entry below for
-why, and the next-live-test candidate.
-
-Also built the *encoding* half of mouse protocol support (`src/puppy/mouse.py`):
-`encode_sgr_mouse_event` produces the exact `CSI < Cb;Cx;Cy M/m` bytes for a given
-button/action/modifiers, with every bit-encoding rule (button numbering, the
-motion/scroll/extra-button indicator bits, SGR release keeping the real button instead of
-legacy's forced `cb=3`) verified against kitty's real `mouse.c`, not derived from memory.
-`generate_mouse_report` wraps it with mode-gating against `Screen.private_modes` (1000 =
-press/release only, 1002 = + drag, 1003 = + pure motion with no button held, 1006
-required for SGR encoding to apply at all — legacy X10/UTF8 encoding without 1006 is a
-deliberate gap, not built). This is genuinely only half the feature: there's still no
-real mouse-event *source* to call it with (blocked on the windowing-toolkit decision, see
-below) — but the encoding logic is complete, correct, and unit-tested against hand-
-derived byte sequences today, ready to wire up the moment there's an event to feed it.
-
-**Security fix (2026-08-13, caught by an automated commit review, not by us):** `_csi()`
-accumulated CSI parameter digits with no length cap, and `_param()`/the SGR handler ran
-bare `int()` on the result. A single crafted escape sequence with a long enough digit
-run (e.g. from `cat`-ing an untrusted file, or a compromised remote program's output —
-a classic terminal-emulator attack surface) would exceed Python's int-string-conversion
-digit limit and raise an uncaught `ValueError`, crashing the whole parse loop on one
-byte stream. Fixed by capping param length (7 digits) and param count (32) at
-accumulation time, plus wrapping the `int()` calls in `try/except ValueError` as
-defense in depth. Two regression tests added (`test_huge_csi_param_digit_run_does_not_
-crash`, `test_huge_csi_param_count_does_not_crash`). **Lesson for future milestones**:
-any place that accumulates attacker-controlled bytes into a buffer before parsing
-(OSC content parsing, once that's implemented, is the next one that will need this)
-needs an explicit cap from the start, not added after the fact.
+Full history of everything before today lives in the dated Milestones checklist below —
+not duplicated here, per this file's own "replace, don't append" rule.
 
 ## Architecture decisions log
 
-- **Rendering/windowing toolkit: DEFERRED, not yet decided.** Candidates from the
-  research doc: `pywayland` (native Niri fit, most raw-event control), GTK4 (rich
-  key-event API, heavier dep), SDL2 (simple, good raw key events, less native Wayland
-  polish). This matters most for the kitty keyboard protocol, which needs real
-  press/repeat/release key events, not just text input. **Deliberately scoped around**
-  for now: the parser + screen-buffer core doesn't need a display to be built or tested,
-  so we're building and proving that layer first and picking the toolkit when rendering
-  actually starts (see Milestones).
+- **Rendering/windowing toolkit: DECIDED 2026-08-16 — `glfw` + `wgpu-py`/`rendercanvas`
+  + `uharfbuzz` + `freetype-py`.** Long back-and-forth, worth recording in full since it
+  won't be re-litigated without a real reason:
+  1. Research doc's original three candidates (`pywayland`, GTK4, SDL2) were a Session
+     85 placeholder list, not a rigorous comparison — re-examined from scratch.
+  2. Checked what real terminals actually use, from their own source, not from memory:
+     kitty = GLFW + OpenGL (confirmed in `~/Projects/kitty/kitty/glfw.c`/`glfw-wrapper.h`,
+     both Wayland and X11 GLFW backends ship and are what's installed on this system).
+     Ghostty (a terminal with very high kitty-protocol fidelity, second only to kitty
+     itself) = GTK4 on Linux, confirmed via its own docs/wiki. foot = raw Wayland + fcft,
+     but has materially weaker kitty-protocol support (no graphics protocol, partial
+     keyboard protocol) than kitty/Ghostty — evidence that "less abstraction" doesn't
+     reliably correlate with "more protocol fidelity."
+  3. GTK4 was briefly the leading candidate (rich key-event API via
+     `GtkEventControllerKey`, Pango for text shaping "for free", desktop-native fit) —
+     but the user pushed back on defaulting to it just because it's the most
+     batteries-included option, and asked what OdyTTY (the other terminal actually
+     installed and daily-driven on this system) uses. Checked OdyTTY's real
+     `Cargo.toml` on GitHub directly (not its marketing page, which 403'd): `winit`
+     (windowing) + `wgpu` (GPU API, the same wgpu also used by WezTerm) + `swash`/
+     `skrifa` (font shaping) + `tiny-skia` (rasterization) + `rustix` (PTY, same
+     approach puppy already uses). Two real, locally-relevant reference terminals
+     (kitty, OdyTTY) independently converged on "thin windowing crate + direct modern
+     GPU API + real shaping libraries," not a full toolkit — GTK4/Ghostty is the
+     outlier, not the pattern, among the terminals actually running on this machine.
+  4. Found the direct Python equivalents of OdyTTY's exact stack, verified real and
+     maintained (not just plausible names): `glfw` (ctypes bindings to the actual GLFW
+     C library kitty uses — same proven Wayland backend), `wgpu-py`/`rendercanvas`
+     (wraps `wgpu-native`, the literal same Rust `wgpu` crate OdyTTY links against,
+     compiled to a C-ABI library; `rendercanvas` has first-class built-in GLFW canvas
+     integration), `uharfbuzz` (real Cython bindings to actual HarfBuzz under the
+     official HarfBuzz GitHub org, actively maintained — the same shaping engine kitty
+     itself uses in C), `freetype-py` (real FreeType bindings, used as a direct
+     dependency by fontTools). Rejected `pyglet` as a windowing candidate specifically
+     because its Wayland support is a long-standing (since 2022) unresolved gap.
+  5. **Verified the full pipeline actually works in this environment before
+     committing**, not just that the packages import: a real GLFW window creates
+     natively on Wayland (platform code confirms `GLFW_PLATFORM_WAYLAND`, not an
+     XWayland fallback); a real `wgpu` adapter/device/surface pipeline configures
+     against it (`Intel(R) Graphics (ADL GT2) via Vulkan`, the real iGPU); a round-trip
+     clear+pixel-readback test against the real GPU (not a mock) proved exact-byte
+     color accuracy across all 256 values; and real HarfBuzz shaping + FreeType
+     rasterization against the actual system default font (DejaVu Markup Nerd Font)
+     produced real glyph IDs, advances, and a rasterized bitmap.
+  6. Kitty theme (`kitten themes`) compatibility was raised as a possible discriminator
+     but turned out not to be one: kitty themes are just plain-text color config
+     (`color0`-`color15`, `foreground`, `background`, etc.), completely decoupled from
+     the rendering/windowing layer — any of the candidates could parse and apply them
+     equally, so this didn't favor any option.
+  - This matters most for the kitty keyboard protocol (needs real press/repeat/release
+    events) and the kitty graphics protocol (needs real GPU texture compositing) —
+    both are now unblocked to start once the basic window+render loop is built out
+    further (see Milestones/Next steps).
+- **GPU colors are linear-space; theme/SGR colors are sRGB bytes — always convert.**
+  Confirmed by round-tripping clear+pixel-readback against the real GPU (exhaustively,
+  all 256 byte values, zero mismatches): `wgpu`'s surface format is sRGB-encoded (e.g.
+  `bgra8unorm-srgb`), and it treats `clear_value`/vertex-color input as **linear**,
+  gamma-*encoding* it automatically on write. A theme hex color or SGR RGB value is
+  always specified as an sRGB byte (the normal display convention) — passing
+  `byte/255` straight to the GPU double-encodes and renders too bright/washed out.
+  `puppy.render.color.srgb_to_linear`/`srgb_color` does the correct decode; any new
+  code that hands a color to `GpuContext` must go through it, never a raw `/255`.
+- **Python environment: `.venv`, not system Python, from this point on.** The parser/
+  screen/mouse layers had no native dependencies and were fine installed system-wide
+  (`--break-system-packages`) in earlier sessions. The render layer's GPU/windowing
+  deps (`glfw`, `wgpu`, `rendercanvas`, `uharfbuzz`, `freetype-py`) are native
+  packages that shouldn't pollute system Python — `~/Projects/puppy/.venv` (gitignored)
+  is now the standard way to work on this project. `tests/test_render_*.py` use
+  `pytest.importorskip` so the suite still runs (with those specific tests skipped,
+  not failed) under system Python that hasn't installed the render deps — but real
+  render-layer work needs the venv activated.
 - **Parser performance: pure Python first.** No Cython/Rust until profiling under real
   load (e.g. `cat` on a large file, `yes`) shows the pure-Python parser is actually the
   bottleneck. Don't pre-optimize.
@@ -256,8 +252,36 @@ with the date when something is confirmed working (not just "code exists").
       the host shell already has, deliberately, so as not to change the
       already-live-tested pass-through behavior without a fresh live check;
       trying `TERM=puppy python -m puppy` is the next live-test candidate.
-- [ ] **Decide rendering/windowing toolkit**, build minimal glyph-grid renderer
-- [ ] Kitty keyboard protocol (CSI u) — needs the windowing toolkit decided first
+- [x] **Decide rendering/windowing toolkit** — `glfw` + `wgpu-py`/`rendercanvas` +
+      `uharfbuzz` + `freetype-py`, 2026-08-16, see the Architecture decisions log
+      entry for full reasoning. `.venv` set up with all four installed.
+- [x] Minimal GPU pipeline proof-of-concept — `src/puppy/render/gpu.py`
+      (`GpuContext`: canvas-agnostic adapter/device/surface setup + a single
+      clear-color render pass), `src/puppy/render/color.py` (sRGB↔linear
+      conversion, exhaustively round-trip-verified against the real GPU across
+      all 256 byte values), `src/puppy/render/window.py` (a live GLFW window
+      wrapping `GpuContext` — lifecycle only, no key/mouse callbacks wired yet).
+      Real, non-mocked pytest coverage via `rendercanvas.offscreen` (headless,
+      no visible window, real numeric pixel readback) — 2026-08-16, 8 new
+      tests. `Window` itself was smoke-tested once, briefly, non-interactively
+      (create+verify+close, no event loop) — real GLFW+wgpu window creation on
+      the live Wayland session confirmed working, `bgra8unorm-srgb` surface
+      format. Not yet a real terminal renderer — no font/glyph/cell-grid
+      drawing yet, just "open a window, clear it to an exact color, prove it."
+- [ ] Glyph-grid renderer — take `Screen`'s cell grid and actually draw it:
+      HarfBuzz-shape + FreeType-rasterize into a glyph atlas texture, one
+      instanced-quad draw call per cell (fg/bg/bold/underline/reverse from
+      `Cell`, via `srgb_color`). This is the real next milestone — everything
+      built 2026-08-16 is plumbing/proof, not a usable renderer yet.
+- [ ] Key/mouse event capture wired to the live `Window` (GLFW callbacks ->
+      `puppy.mouse.generate_mouse_report` for mouse, and the eventual kitty
+      keyboard protocol encoder for keys) — `PtySession.write` is the
+      already-existing sink, just needs a real source now that one exists.
+- [ ] Kitty keyboard protocol (CSI u) — encoding logic can now be built
+      against real GLFW key/scancode/modifier events (`glfw.set_key_callback`
+      gives press/repeat/release natively), following the same
+      "encode_*_event, pure function, unit-tested against known bytes" pattern
+      already used for mouse in `src/puppy/mouse.py`.
 - [ ] Kitty graphics protocol (RGB/RGBA/PNG direct mode first)
 - [ ] Kitty graphics: unicode-placeholder image-in-text method
 - [ ] Sixel graphics (fallback/parity with non-kitty terminals)
@@ -269,7 +293,8 @@ with the date when something is confirmed working (not just "code exists").
 ```
 puppy/
   PROGRESS.md          this file
-  pyproject.toml
+  pyproject.toml        now declares glfw/wgpu/rendercanvas/uharfbuzz/freetype-py
+  .venv/                 gitignored, real dependency install lives here — activate it
   src/puppy/
     __init__.py
     __main__.py         pass-through+dump harness (current entry point)
@@ -277,6 +302,11 @@ puppy/
     parser.py            Parser — byte-level VT/ANSI state machine
     screen.py             Screen, Cell — in-memory grid + cursor + SGR attrs
     mouse.py               SGR mouse-event encoding, no event source wired up yet
+    render/
+      __init__.py          toolkit-choice rationale pointer
+      gpu.py                 GpuContext — canvas-agnostic adapter/device/surface + clear()
+      color.py                sRGB<->linear conversion (GPU wants linear, themes are sRGB)
+      window.py                live GLFW window wrapping GpuContext, lifecycle only
   terminfo/
     puppy.terminfo       terminfo source, use=xterm-256color + real overrides
   scripts/
@@ -285,21 +315,35 @@ puppy/
     test_parser.py
     test_screen.py
     test_mouse.py
+    test_render_color.py  pure sRGB/linear math, no GPU needed
+    test_render_gpu.py     real wgpu + offscreen canvas, real pixel readback, skips if no adapter
 ```
 
 ## Next steps (pick up here)
 
-1. Live-test `TERM=puppy python -m puppy` in a real terminal window — confirm a
-   real ncurses/vim session run *inside* puppy actually looks right with the new
-   terminfo entry active (colors, alt-screen enter/exit, scroll regions), not just
-   that `curses.setupterm()` accepts it headlessly. Needs an interactive session,
-   can't be done from here — same as the earlier live-test milestone.
-2. **Decide the rendering/windowing toolkit** (pywayland/GTK4/SDL2, still deferred)
-   is now the real next blocker, not a "someday" item — the text-only model is
-   substantial (VT100 baseline, alt-screen, scrollback, 256/truecolor, the full OSC
-   family, private-mode tracking, bce, a real terminfo entry, mouse-event *encoding*)
-   and mouse *event generation* specifically is sitting there half-built
-   (`src/puppy/mouse.py` is done and tested) waiting only on something to source
-   real events from. This decision should come before more protocol layers, not
-   after — everything past this point (kitty keyboard protocol especially) needs
-   real low-level key/mouse events from a windowing toolkit, not just PTY bytes.
+**Before anything else: `source .venv/bin/activate`** — the render layer's
+dependencies live there, not in system Python. `pip install -e .` again if the venv
+is ever recreated (it's gitignored).
+
+1. Build the glyph-grid renderer: shape+rasterize `Screen`'s actual cell grid instead
+   of a flat clear color. Concretely: for each unique glyph encountered, HarfBuzz-shape
+   + FreeType-rasterize it into a shared texture atlas (cache by glyph id, not
+   re-rasterize every frame), then one instanced draw call renders every cell as a
+   textured quad using `Cell.fg`/`bg`/`bold`/`underline`/`reverse` (through
+   `srgb_color`, per the linear-vs-sRGB decision above — don't forget this on the
+   first real color that isn't a flat test clear). This is the actual "does puppy
+   look like a terminal yet" milestone.
+2. Wire real key/mouse events into the live `Window`: GLFW's `set_key_callback`
+   (press/repeat/release natively — exactly what the kitty keyboard protocol needs)
+   and `set_mouse_button_callback`/`set_cursor_pos_callback`/`set_scroll_callback` for
+   mouse, feeding `puppy.mouse.generate_mouse_report` (already built) and
+   `PtySession.write` (already built) — this is mostly plumbing two already-tested
+   halves together, not new protocol logic.
+3. Then the kitty keyboard protocol itself (CSI u encoding) — same pattern as
+   `mouse.py`: a pure `encode_*_event` function unit-tested against known byte
+   sequences, verified against kitty's real `keys.c`/`key_encoding.c` before trusting
+   the encoding (same verification discipline used throughout this project).
+4. Separately, whenever there's a spare cycle: live-test `TERM=puppy python -m
+   puppy` in a real terminal window (a real ncurses/vim session using the terminfo
+   entry, not just `curses.setupterm()` accepting it headlessly) — still pending,
+   needs an interactive session, not blocking the render work above.

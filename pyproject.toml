@@ -3,6 +3,13 @@ name = "puppy"
 version = "0.1.0"
 description = "A terminal emulator built from scratch in Python, targeting kitty-protocol parity."
 requires-python = ">=3.11"
+dependencies = [
+    "glfw",
+    "wgpu",
+    "rendercanvas",
+    "uharfbuzz",
+    "freetype-py",
+]
 
 [build-system]
 requires = ["setuptools>=68"]
