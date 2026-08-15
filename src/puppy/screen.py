@@ -1,4 +1,5 @@
-"""In-memory VT screen buffer: a grid of cells, cursor, and basic SGR attributes.
+"""In-memory VT screen buffer: a grid of cells, cursor, SGR/hyperlink attributes,
+scrollback, private-mode tracking, and OSC metadata (title/palette/clipboard).
 
 No rendering, no PTY awareness — a Screen is just a model that a Parser writes into.
 """
@@ -16,6 +17,7 @@ class Cell:
     bold: bool = False
     underline: bool = False
     reverse: bool = False
+    hyperlink: str | None = None
 
 
 class Screen:
@@ -56,6 +58,20 @@ class Screen:
         # falling through to this generic set; everything else is "recognized, state
         # tracked, no behavior yet" until something downstream needs it.
         self.private_modes: set[int] = set()
+        # OSC family: window/icon title (0/1/2), 256-color palette overrides (4),
+        # default fg/bg color (10/11), clipboard (52) -- all just metadata storage,
+        # nothing reads/renders them yet. Values are kept as raw spec strings
+        # (e.g. "rgb:ff/00/80" or "#ff0080") rather than parsed into RGB tuples --
+        # that parsing belongs with whatever eventually renders them.
+        self.window_title: str | None = None
+        self.icon_title: str | None = None
+        self.palette: dict[int, str] = {}
+        self.default_fg_spec: str | None = None
+        self.default_bg_spec: str | None = None
+        self.clipboard: dict[str, str] = {}
+        # OSC 8 hyperlinks: like SGR, an active link attaches to every subsequently
+        # written Cell until cleared (OSC 8 with an empty URI).
+        self._active_hyperlink: str | None = None
 
     def set_private_mode(self, mode: int, enabled: bool) -> None:
         if enabled:
@@ -74,6 +90,29 @@ class Screen:
     @property
     def sync_output_pending(self) -> bool:
         return 2026 in self.private_modes
+
+    # --- OSC family ---
+
+    def set_window_title(self, title: str) -> None:
+        self.window_title = title
+
+    def set_icon_title(self, title: str) -> None:
+        self.icon_title = title
+
+    def set_palette_color(self, index: int, spec: str) -> None:
+        self.palette[index] = spec
+
+    def set_default_fg(self, spec: str) -> None:
+        self.default_fg_spec = spec
+
+    def set_default_bg(self, spec: str) -> None:
+        self.default_bg_spec = spec
+
+    def set_clipboard(self, selection: str, data: str) -> None:
+        self.clipboard[selection] = data
+
+    def set_hyperlink(self, uri: str | None) -> None:
+        self._active_hyperlink = uri
 
     @staticmethod
     def _default_sgr() -> dict:
@@ -144,7 +183,9 @@ class Screen:
         if self.cursor_col >= self.cols:
             self.cursor_col = 0
             self.linefeed()
-        self.grid[self.cursor_row][self.cursor_col] = Cell(char=ch, **self._sgr)
+        self.grid[self.cursor_row][self.cursor_col] = Cell(
+            char=ch, hyperlink=self._active_hyperlink, **self._sgr
+        )
         self.cursor_col += 1
 
     def linefeed(self) -> None:

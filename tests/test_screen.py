@@ -313,3 +313,42 @@ def test_private_mode_reset_of_unset_mode_is_a_noop():
     s = Screen()
     s.set_private_mode(9999, False)  # never set -- must not raise
     assert 9999 not in s.private_modes
+
+
+def test_set_window_and_icon_title():
+    s = Screen()
+    s.set_window_title("window")
+    s.set_icon_title("icon")
+    assert s.window_title == "window"
+    assert s.icon_title == "icon"
+
+
+def test_set_palette_color_stores_raw_spec():
+    s = Screen()
+    s.set_palette_color(196, "rgb:ff/00/00")
+    assert s.palette[196] == "rgb:ff/00/00"
+
+
+def test_set_default_fg_bg():
+    s = Screen()
+    s.set_default_fg("#eeeeee")
+    s.set_default_bg("#111111")
+    assert s.default_fg_spec == "#eeeeee"
+    assert s.default_bg_spec == "#111111"
+
+
+def test_set_clipboard_stores_by_selection():
+    s = Screen()
+    s.set_clipboard("c", "aGVsbG8=")
+    s.set_clipboard("p", "d29ybGQ=")
+    assert s.clipboard == {"c": "aGVsbG8=", "p": "d29ybGQ="}
+
+
+def test_set_hyperlink_attaches_and_clears():
+    s = Screen(rows=1, cols=5)
+    s.set_hyperlink("http://example.com")
+    s.put_char("a")
+    s.set_hyperlink(None)
+    s.put_char("b")
+    assert s.grid[0][0].hyperlink == "http://example.com"
+    assert s.grid[0][1].hyperlink is None

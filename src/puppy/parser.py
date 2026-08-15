@@ -1,12 +1,16 @@
 """Byte-level VT/ANSI escape-sequence parser.
 
-Feeds bytes in, dispatches decoded characters and control sequences onto a
-"sink" object (normally a `Screen`) that exposes: put_char, carriage_return,
-linefeed, backspace, tab, cursor_up/down/forward/back, cursor_position,
-erase_in_display, erase_in_line, sgr.
+Feeds bytes in, dispatches decoded characters and control sequences onto a "sink"
+object (normally a `Screen`) that exposes: put_char, carriage_return, linefeed,
+backspace, tab, cursor movement/erase/scroll-region/insert-delete methods, sgr,
+save/restore_cursor, index/reverse_index, enter/exit_alt_screen, set_private_mode,
+set_window_title/set_icon_title, set_palette_color, set_default_fg/bg,
+set_clipboard, set_hyperlink.
 
-Baseline VT100/ECMA-48/xterm subset only — see PROGRESS.md milestones for what's
-still missing (alt screen, scroll regions, mouse, OSC contents, kitty extensions).
+Baseline VT100/ECMA-48/xterm subset plus the OSC family (title/palette/clipboard/
+hyperlinks) and generic DEC private-mode tracking -- see PROGRESS.md milestones for
+what's still missing (kitty keyboard/graphics protocols, mouse *event generation*
+as opposed to mode tracking, Sixel).
 """
 from __future__ import annotations
 
@@ -27,6 +31,15 @@ class Parser:
     _MAX_PARAM_LEN = 7
     _MAX_PARAMS = 32
 
+    # OSC payloads (title, hyperlinks, clipboard base64, ...) are unbounded in the
+    # spec, so they get buffered rather than parsed byte-by-byte -- same class of
+    # risk as the CSI param DoS above, so capped from the start this time instead of
+    # bolted on after the fact. 8192 bytes covers any real title/URI and a
+    # reasonably-sized clipboard paste; kitty's own real limit wasn't found in a
+    # quick source search, so this is a deliberately chosen defensive bound, not a
+    # matched constant.
+    _MAX_OSC_LEN = 8192
+
     def __init__(self, sink) -> None:
         self.sink = sink
         self.state = self.GROUND
@@ -40,6 +53,7 @@ class Parser:
         self._private = False
         self._utf8_bytes = bytearray()
         self._osc_pending_esc = False
+        self._osc_buf = bytearray()
 
     def feed(self, data: bytes) -> None:
         for byte in data:
@@ -101,6 +115,7 @@ class Parser:
         if ch == "]":
             self.state = self.OSC
             self._osc_pending_esc = False
+            self._osc_buf = bytearray()
             return
         if ch in "()*+":
             self.state = self.CHARSET
@@ -217,7 +232,7 @@ class Parser:
                 # what Screen.private_modes exposes.
                 self.sink.set_private_mode(mode, enable)
 
-    # --- OSC: buffer until ST (ESC \) or BEL, contents discarded for now ---
+    # --- OSC: buffer until ST (ESC \) or BEL, then parse Ps;Pt ---
 
     def _osc(self, byte: int) -> None:
         if byte == BEL:
@@ -231,8 +246,59 @@ class Parser:
             if byte == ord("\\"):
                 self._finish_osc()
                 return
-        # OSC payload bytes are discarded — title/clipboard/hyperlinks not yet implemented
+        if len(self._osc_buf) < self._MAX_OSC_LEN:
+            self._osc_buf.append(byte)
+        # else: silently truncated rather than growing unboundedly
 
     def _finish_osc(self) -> None:
         self._osc_pending_esc = False
         self.state = self.GROUND
+        self._dispatch_osc(bytes(self._osc_buf))
+        self._osc_buf = bytearray()
+
+    @staticmethod
+    def _safe_int(s: str, max_len: int = 6) -> int | None:
+        # Same guard as CSI params: a long enough digit run inside the (already
+        # length-capped) OSC buffer could still exceed Python's int-string
+        # conversion limit on its own. max_len=6 is far more than any real OSC
+        # code/index needs.
+        if not s or len(s) > max_len or not s.isdigit():
+            return None
+        try:
+            return int(s)
+        except ValueError:
+            return None
+
+    def _dispatch_osc(self, payload: bytes) -> None:
+        try:
+            text = payload.decode("utf-8")
+        except UnicodeDecodeError:
+            return  # malformed payload (or truncated mid-codepoint) -- ignore
+        code_str, _, rest = text.partition(";")
+        code = self._safe_int(code_str)
+        if code is None:
+            return
+        if code == 0:
+            self.sink.set_icon_title(rest)
+            self.sink.set_window_title(rest)
+        elif code == 1:
+            self.sink.set_icon_title(rest)
+        elif code == 2:
+            self.sink.set_window_title(rest)
+        elif code == 4:
+            fields = rest.split(";")
+            for i in range(0, len(fields) - 1, 2):
+                index = self._safe_int(fields[i])
+                if index is not None:
+                    self.sink.set_palette_color(index, fields[i + 1])
+        elif code == 10:
+            self.sink.set_default_fg(rest)
+        elif code == 11:
+            self.sink.set_default_bg(rest)
+        elif code == 52:
+            selection, _, data = rest.partition(";")
+            self.sink.set_clipboard(selection or "c", data)
+        elif code == 8:
+            _params, _, uri = rest.partition(";")
+            self.sink.set_hyperlink(uri or None)
+        # else: not yet implemented, silently ignored

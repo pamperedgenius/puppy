@@ -144,14 +144,16 @@ def test_sgr_truecolor_colon_form_with_colorspace_id():
     assert screen.grid[0][0].fg == (255, 0, 128)
 
 
-def test_osc_sequence_terminated_by_bel_is_skipped():
+def test_osc_sequence_terminated_by_bel_is_parsed_and_does_not_leak_into_text():
     screen = _run(b"\x1b]0;title\x07ok")
     assert screen.dump_text().splitlines()[0] == "ok"
+    assert screen.window_title == "title"
 
 
-def test_osc_sequence_terminated_by_st_is_skipped():
+def test_osc_sequence_terminated_by_st_is_parsed_and_does_not_leak_into_text():
     screen = _run(b"\x1b]0;title\x1b\\ok")
     assert screen.dump_text().splitlines()[0] == "ok"
+    assert screen.window_title == "title"
 
 
 def test_carriage_return_and_linefeed():
@@ -190,3 +192,76 @@ def test_unrecognized_private_mode_is_tracked_generically_not_crashed():
 def test_alt_screen_mode_does_not_leak_into_generic_private_modes():
     screen = _run(b"\x1b[?1049h")
     assert 1049 not in screen.private_modes  # handled as a special case, not generic
+
+
+def test_osc_0_sets_both_icon_and_window_title():
+    screen = _run(b"\x1b]0;puppy session\x07")
+    assert screen.window_title == "puppy session"
+    assert screen.icon_title == "puppy session"
+
+
+def test_osc_1_sets_icon_title_only():
+    screen = _run(b"\x1b]1;icon only\x07")
+    assert screen.icon_title == "icon only"
+    assert screen.window_title is None
+
+
+def test_osc_2_sets_window_title_only():
+    screen = _run(b"\x1b]2;window only\x07")
+    assert screen.window_title == "window only"
+    assert screen.icon_title is None
+
+
+def test_osc_4_sets_palette_color():
+    screen = _run(b"\x1b]4;196;rgb:ff/00/00\x07")
+    assert screen.palette[196] == "rgb:ff/00/00"
+
+
+def test_osc_4_sets_multiple_palette_colors_in_one_sequence():
+    screen = _run(b"\x1b]4;1;#ff0000;2;#00ff00\x07")
+    assert screen.palette[1] == "#ff0000"
+    assert screen.palette[2] == "#00ff00"
+
+
+def test_osc_10_and_11_set_default_fg_bg():
+    screen = _run(b"\x1b]10;#eeeeee\x07\x1b]11;#111111\x07")
+    assert screen.default_fg_spec == "#eeeeee"
+    assert screen.default_bg_spec == "#111111"
+
+
+def test_osc_52_sets_clipboard():
+    screen = _run(b"\x1b]52;c;aGVsbG8=\x07")
+    assert screen.clipboard["c"] == "aGVsbG8="
+
+
+def test_osc_52_empty_selection_defaults_to_c():
+    screen = _run(b"\x1b]52;;aGVsbG8=\x07")
+    assert screen.clipboard["c"] == "aGVsbG8="
+
+
+def test_osc_8_hyperlink_attaches_to_subsequent_chars_until_cleared():
+    screen = _run(b"\x1b]8;;http://example.com\x07link\x1b]8;;\x07plain")
+    line = screen.grid[0]
+    assert line[0].hyperlink == "http://example.com"
+    assert line[3].hyperlink == "http://example.com"
+    assert line[4].hyperlink is None  # 'p' of "plain", after the closing OSC 8
+
+
+def test_osc_malformed_utf8_payload_does_not_crash():
+    screen = _run(b"\x1b]0;\xff\xfe\x07ok")
+    assert screen.dump_text().splitlines()[0] == "ok"
+
+
+def test_osc_huge_code_number_does_not_crash():
+    huge = b"9" * 20000
+    screen = _run(b"\x1b]" + huge + b";x\x07ok")
+    assert screen.dump_text().splitlines()[0] == "ok"
+    assert screen.window_title is None
+
+
+def test_osc_huge_payload_is_truncated_not_unbounded():
+    huge_title = b"x" * 50000
+    screen = _run(b"\x1b]2;" + huge_title + b"\x07ok")
+    assert screen.dump_text().splitlines()[0] == "ok"
+    assert screen.window_title is not None
+    assert len(screen.window_title) < 50000

@@ -81,10 +81,24 @@ convenience properties for the three specifically named in the milestone list (2
 1004, 2026). Alt-screen modes (47/1047/1049) stay a special case in `Parser` handled
 before the generic fallback, so they don't also land in `private_modes`. No behavior
 beyond state tracking yet — synchronized output specifically still needs an actual
-renderer to batch updates for, which doesn't exist. 63 unit tests passing, including
-hang-safety tests (`insert_lines`/`delete_chars` with a huge count must clamp to the
-region/line size, not loop attacker-controlled-times — same DoS class as the CSI-param
-fix below, caught proactively this time instead of by review).
+renderer to batch updates for, which doesn't exist. Also implemented the OSC family:
+title (`0`/`1`/`2`), 256-color palette overrides (`4`), default fg/bg (`10`/`11`),
+clipboard (`52`), and hyperlinks (`8`). OSC payloads used to be fully discarded
+(`_finish_osc` was a no-op); now they're buffered (capped at 8192 bytes — same DoS class
+as the CSI-param fix, capped from the start this time rather than added after the fact)
+and parsed into `Screen` fields (`window_title`/`icon_title`/`palette`/
+`default_fg_spec`/`default_bg_spec`/`clipboard`, plus a per-`Cell` `hyperlink` field that
+attaches like an SGR attribute to every char written while an OSC 8 link is active).
+Values are kept as raw spec strings (`"rgb:ff/00/00"`, `"#ff0080"`) rather than parsed
+into RGB tuples — that parsing belongs with whatever eventually renders them, not with
+the parser. All of `_safe_int` (a length-capped digit-only int parse, same guard class
+as CSI params) and the 8192-byte OSC buffer cap were sized defensively; kitty's own real
+OSC buffer limit wasn't found in a quick source search, so these are deliberately chosen
+bounds, not matched constants. 80 unit tests passing, including hang-safety tests
+(`insert_lines`/`delete_chars` with a huge count must clamp to the region/line size, not
+loop attacker-controlled-times — same DoS class as the CSI-param fix below, caught
+proactively this time instead of by review) and OSC-specific DoS tests (huge code
+number, huge payload — both must truncate/reject, not hang or crash).
 `python -m puppy` was spawned in a live xfce4-terminal window (2026-08-15) and the user
 confirmed it looked fine ("everything is good") — this counts as the live-test milestone
 being done, even though nothing was independently screenshotted (no way to see a live GUI
@@ -181,8 +195,11 @@ with the date when something is confirmed working (not just "code exists").
       2026-08-15, state tracking only (`Screen.private_modes`, generic for any DEC
       private mode) — none of these change behavior yet, sync output specifically
       needs a real renderer to batch updates for, see Current status
-- [ ] Mouse protocols (1000/1002/1003/1006 SGR)
-- [ ] OSC family: title (0/1/2), palette (4/10/11), clipboard (52), hyperlinks (8)
+- [ ] Mouse protocols (1000/1002/1003/1006 SGR) — mode *tracking* already works via
+      the generic private-mode system above; still need actual event generation
+- [x] OSC family: title (0/1/2), palette (4), default fg/bg (10/11), clipboard (52),
+      hyperlinks (8) — 2026-08-15, unit-tested, includes DoS-safety tests (huge code
+      number, huge payload) — see Current status for the buffering/cap design
 - [ ] Terminfo entry so real programs (vim, ncurses apps) detect capabilities correctly
 - [ ] **Decide rendering/windowing toolkit**, build minimal glyph-grid renderer
 - [ ] Kitty keyboard protocol (CSI u) — needs the windowing toolkit decided first
@@ -211,13 +228,15 @@ puppy/
 
 ## Next steps (pick up here)
 
-1. Mouse protocols (1000/1002/1003/1006 SGR) and the OSC family (title, palette,
-   clipboard, hyperlinks) next — OSC content is currently fully discarded by the
-   parser (`_finish_osc`), so this needs real buffering with a length cap from the
-   start (see the security-fix lesson in Current status/2026-08-13).
+1. Mouse *event generation* next (1000/1002/1003/1006 SGR reporting sequences sent
+   back to the child on real mouse input) — mode tracking already works via the
+   generic private-mode system, this is the remaining "actually do something" half,
+   and it needs `PtySession.write` wired to whatever eventually captures raw mouse
+   events, so it may end up blocked on the windowing-toolkit decision below anyway.
 2. Terminfo entry next, so real programs (vim, ncurses apps) detect what puppy
    actually supports instead of guessing from `$TERM`.
 3. Then **decide the rendering/windowing toolkit** (pywayland/GTK4/SDL2, still
-   deferred) — the text-only model is getting substantial enough that rendering is
-   close to being the next real thing blocking progress, not scrollback/protocol
-   work anymore.
+   deferred) — the text-only model is substantial now (VT100 baseline, alt-screen,
+   scrollback, 256/truecolor, OSC title/palette/clipboard/hyperlinks, private-mode
+   tracking), so rendering is genuinely the next thing blocking real usability, not
+   another protocol layer.
