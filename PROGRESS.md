@@ -136,6 +136,19 @@ capabilities correctly, including `bce: 1` after that fix. Not yet wired as the 
 `TERM` for `python -m puppy`'s spawned shell — see the terminfo milestone entry below for
 why, and the next-live-test candidate.
 
+Also built the *encoding* half of mouse protocol support (`src/puppy/mouse.py`):
+`encode_sgr_mouse_event` produces the exact `CSI < Cb;Cx;Cy M/m` bytes for a given
+button/action/modifiers, with every bit-encoding rule (button numbering, the
+motion/scroll/extra-button indicator bits, SGR release keeping the real button instead of
+legacy's forced `cb=3`) verified against kitty's real `mouse.c`, not derived from memory.
+`generate_mouse_report` wraps it with mode-gating against `Screen.private_modes` (1000 =
+press/release only, 1002 = + drag, 1003 = + pure motion with no button held, 1006
+required for SGR encoding to apply at all — legacy X10/UTF8 encoding without 1006 is a
+deliberate gap, not built). This is genuinely only half the feature: there's still no
+real mouse-event *source* to call it with (blocked on the windowing-toolkit decision, see
+below) — but the encoding logic is complete, correct, and unit-tested against hand-
+derived byte sequences today, ready to wire up the moment there's an event to feed it.
+
 **Security fix (2026-08-13, caught by an automated commit review, not by us):** `_csi()`
 accumulated CSI parameter digits with no length cap, and `_param()`/the SGR handler ran
 bare `int()` on the result. A single crafted escape sequence with a long enough digit
@@ -218,8 +231,14 @@ with the date when something is confirmed working (not just "code exists").
       2026-08-15, state tracking only (`Screen.private_modes`, generic for any DEC
       private mode) — none of these change behavior yet, sync output specifically
       needs a real renderer to batch updates for, see Current status
-- [ ] Mouse protocols (1000/1002/1003/1006 SGR) — mode *tracking* already works via
-      the generic private-mode system above; still need actual event generation
+- [x] Mouse protocols (1000/1002/1003/1006 SGR) — **encoding half done**, event
+      *source* still missing (see Current status): `src/puppy/mouse.py`,
+      `encode_sgr_mouse_event` (pure bit-encoding, verified against kitty's real
+      `encode_mouse_event_impl`/`encode_button` in `mouse.c`) + `generate_mouse_
+      report` (mode-gated via `Screen.private_modes`: 1000=press/release,
+      1002=+drag, 1003=+pure motion, 1006 required for SGR encoding at all) —
+      2026-08-15, unit-tested against hand-derived byte sequences. Legacy X10/
+      UTF8 encoding (mode 1006 not set) is a deliberate, documented gap.
 - [x] OSC family: title (0/1/2), palette (4), default fg/bg (10/11), clipboard (52),
       hyperlinks (8) — 2026-08-15, unit-tested, includes DoS-safety tests (huge code
       number, huge payload) — see Current status for the buffering/cap design
@@ -257,6 +276,7 @@ puppy/
     pty_session.py       PtySession — spawn/read/write/resize a real PTY
     parser.py            Parser — byte-level VT/ANSI state machine
     screen.py             Screen, Cell — in-memory grid + cursor + SGR attrs
+    mouse.py               SGR mouse-event encoding, no event source wired up yet
   terminfo/
     puppy.terminfo       terminfo source, use=xterm-256color + real overrides
   scripts/
@@ -264,6 +284,7 @@ puppy/
   tests/
     test_parser.py
     test_screen.py
+    test_mouse.py
 ```
 
 ## Next steps (pick up here)
@@ -273,13 +294,12 @@ puppy/
    terminfo entry active (colors, alt-screen enter/exit, scroll regions), not just
    that `curses.setupterm()` accepts it headlessly. Needs an interactive session,
    can't be done from here — same as the earlier live-test milestone.
-2. Mouse *event generation* next (1000/1002/1003/1006 SGR reporting sequences sent
-   back to the child on real mouse input) — mode tracking already works via the
-   generic private-mode system, this is the remaining "actually do something" half,
-   and it needs `PtySession.write` wired to whatever eventually captures raw mouse
-   events, so it may end up blocked on the windowing-toolkit decision below anyway.
-3. Then **decide the rendering/windowing toolkit** (pywayland/GTK4/SDL2, still
-   deferred) — the text-only model is substantial now (VT100 baseline, alt-screen,
-   scrollback, 256/truecolor, OSC title/palette/clipboard/hyperlinks, private-mode
-   tracking, bce, a real terminfo entry), so rendering is genuinely the next thing
-   blocking real usability, not another protocol layer.
+2. **Decide the rendering/windowing toolkit** (pywayland/GTK4/SDL2, still deferred)
+   is now the real next blocker, not a "someday" item — the text-only model is
+   substantial (VT100 baseline, alt-screen, scrollback, 256/truecolor, the full OSC
+   family, private-mode tracking, bce, a real terminfo entry, mouse-event *encoding*)
+   and mouse *event generation* specifically is sitting there half-built
+   (`src/puppy/mouse.py` is done and tested) waiting only on something to source
+   real events from. This decision should come before more protocol layers, not
+   after — everything past this point (kitty keyboard protocol especially) needs
+   real low-level key/mouse events from a windowing toolkit, not just PTY bytes.
