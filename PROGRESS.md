@@ -47,13 +47,32 @@ now-fixed divergences:
    `DECSC`/`DECRC` (calls `screen_save_cursor` directly), not a separate one, so a
    `DECSC` right before a `1049` entry gets clobbered by it on a real terminal. Was
    treating all three modes identically with an independent save slot; fixed both.
+5. **Back-color-erase (bce) was entirely missing** (found 2026-08-15, while researching
+   the terminfo entry — `bce` is a real terminfo boolean capability, which is what
+   prompted checking whether it was actually implemented): erase/insert/delete-char
+   operations should fill newly-blank cells with the cursor's *current* SGR state, not
+   a hard default. Confirmed against kitty's real `line_apply_cursor`/
+   `linebuf_clear_lines` (`line.c`/`line-buf.c`): `ED`/`EL`/`ICH`/`DCH` all apply full
+   current SGR (fg/bg/bold/underline/reverse — `cursor_as_gpu_cell` copies everything,
+   not just background despite the capability's name) to the cells they blank, but
+   `IL`/`DL` (`linebuf_insert_lines`/`linebuf_delete_lines`, via `clear_line_`) and a
+   full alt-screen-entry/resize blank (`linebuf_clear`) do **not** — a real, confirmed
+   asymmetry, not an inconsistency to "fix into" uniformity. `Screen` previously used a
+   hard-default `Cell()` everywhere; now a `_bce_cell()` helper (current SGR, no
+   hyperlink — confirmed `cursor_to_attrs` never carries hyperlink state) backs
+   `_erase_line_from`, `erase_in_display` modes 2/3, `insert_chars`, and
+   `delete_chars`, while `_shift_up`/`_shift_down` (backing `IL`/`DL` and top-of-screen
+   scroll) and `_blank_grid` (alt-screen entry, resize) correctly keep plain `Cell()`.
 
 **Lesson**: spec-knowledge implementations of "obscure-looking" behavior (exact
-clamping rules, whether an operation also does a CR, which private modes share state)
-should be spot-checked against the real source when it's sitting right there in
-`~/Projects/kitty`, not trusted from memory — none of these four were something a
-plain reading of ECMA-48/xterm docs would have caught. Worth another pass like this
-periodically, not just once.
+clamping rules, whether an operation also does a CR, which private modes share state,
+which operations apply the current background to what they erase) should be
+spot-checked against the real source when it's sitting right there in
+`~/Projects/kitty`, not trusted from memory — none of these five were something a
+plain reading of ECMA-48/xterm docs would have caught, and #5 specifically was only
+found because writing an honest terminfo entry (which has a `bce` capability flag)
+forced the question "do we actually do this?" Worth treating protocol/terminfo work
+as a trigger for another verification pass, not just a one-time audit.
 
 ## Current status (2026-08-15)
 

@@ -352,3 +352,87 @@ def test_set_hyperlink_attaches_and_clears():
     s.put_char("b")
     assert s.grid[0][0].hyperlink == "http://example.com"
     assert s.grid[0][1].hyperlink is None
+
+
+# --- back-color-erase (bce): confirmed against kitty's real line_apply_cursor /
+# linebuf_clear_lines (line.c/line-buf.c) -- ED/EL/ICH/DCH fill newly-blank cells
+# with the *current* SGR state; IL/DL and a full alt-screen/resize blank do NOT.
+# This asymmetry is real, verified in kitty's source, not an inconsistency to "fix".
+
+def test_erase_in_line_applies_current_sgr_bce():
+    s = Screen(rows=1, cols=3)
+    s.sgr([41])  # red background
+    s.erase_in_line(2)
+    assert s.grid[0][0].bg == 41
+    assert s.grid[0][0].char == " "
+
+
+def test_erase_in_display_mode_2_applies_current_sgr_bce():
+    s = Screen(rows=2, cols=2)
+    s.sgr([44])  # blue background
+    s.erase_in_display(2)
+    assert all(cell.bg == 44 for row in s.grid for cell in row)
+
+
+def test_erase_in_display_mode_3_applies_current_sgr_bce():
+    s = Screen(rows=1, cols=2)
+    s.sgr([44])
+    s.erase_in_display(3)
+    assert all(cell.bg == 44 for cell in s.grid[0])
+
+
+def test_insert_chars_applies_current_sgr_bce():
+    s = Screen(rows=1, cols=5)
+    s.put_char("a")
+    s.cursor_position(1, 1)
+    s.sgr([42])  # green background
+    s.insert_chars(2)
+    assert s.grid[0][0].bg == 42
+    assert s.grid[0][1].bg == 42
+
+
+def test_delete_chars_applies_current_sgr_bce():
+    s = Screen(rows=1, cols=5)
+    for ch in "abcde":
+        s.put_char(ch)
+    s.cursor_position(1, 1)
+    s.sgr([43])  # yellow background
+    s.delete_chars(2)
+    assert s.grid[0][4].bg == 43  # trailing exposed cell after the shift
+
+
+def test_insert_lines_does_not_apply_bce():
+    s = Screen(rows=3, cols=2)
+    s.sgr([41])
+    s.insert_lines(1)
+    assert s.grid[0][0].bg is None
+
+
+def test_delete_lines_does_not_apply_bce():
+    s = Screen(rows=3, cols=2)
+    s.sgr([41])
+    s.delete_lines(1)
+    assert s.grid[2][0].bg is None
+
+
+def test_alt_screen_entry_does_not_apply_bce():
+    s = Screen(rows=2, cols=2)
+    s.sgr([41])
+    s.enter_alt_screen()
+    assert s.grid[0][0].bg is None
+
+
+def test_resize_new_area_does_not_apply_bce():
+    s = Screen(rows=1, cols=1)
+    s.sgr([41])
+    s.resize(2, 2)
+    assert s.grid[1][1].bg is None
+
+
+def test_bce_does_not_carry_hyperlink():
+    s = Screen(rows=1, cols=3)
+    s.set_hyperlink("http://example.com")
+    s.sgr([41])
+    s.erase_in_line(2)
+    assert s.grid[0][0].bg == 41
+    assert s.grid[0][0].hyperlink is None

@@ -276,20 +276,33 @@ class Screen:
             self._shift_up(self.cursor_row, self.scroll_bottom, n)
             self.carriage_return()
 
+    def _bce_cell(self) -> Cell:
+        """A blank cell filled with the *current* SGR state (back-color-erase).
+
+        Confirmed against kitty's real line_apply_cursor (line.c): ED/EL/ICH/DCH all
+        fill newly-blank cells with the cursor's full current SGR (fg/bg/bold/
+        underline/reverse -- everything cursor_as_gpu_cell copies, not just bg
+        despite the name "back-color-erase"), never the hyperlink. IL/DL and a full
+        alt-screen/resize blank do NOT do this (confirmed via linebuf_insert_lines/
+        linebuf_delete_lines/linebuf_clear, which all use a true zeroed blank) --
+        that asymmetry is real, not an oversight, so don't "fix" it into consistency.
+        """
+        return Cell(**self._sgr)
+
     def insert_chars(self, n: int = 1) -> None:
         """ICH (CSI Pn @): insert n blank cells at the cursor, within the line."""
         row = self.grid[self.cursor_row]
         n = min(max(n, 0), self.cols - self.cursor_col)
         if n == 0:
             return
-        row[self.cursor_col:self.cursor_col] = [Cell() for _ in range(n)]
+        row[self.cursor_col:self.cursor_col] = [self._bce_cell() for _ in range(n)]
         del row[self.cols:]
 
     def delete_chars(self, n: int = 1) -> None:
         """DCH (CSI Pn P): delete n cells at the cursor, within the line."""
         row = self.grid[self.cursor_row]
         del row[self.cursor_col:self.cursor_col + max(n, 0)]
-        row.extend(Cell() for _ in range(self.cols - len(row)))
+        row.extend(self._bce_cell() for _ in range(self.cols - len(row)))
 
     def carriage_return(self) -> None:
         self.cursor_col = 0
@@ -331,11 +344,11 @@ class Screen:
                 self._erase_line_from(r, 0)
             self._erase_line_from(self.cursor_row, 0, self.cursor_col + 1)
         elif mode == 2:
-            self.grid = self._blank_grid(self.rows, self.cols)
+            self.grid = [[self._bce_cell() for _ in range(self.cols)] for _ in range(self.rows)]
         elif mode == 3:
             # xterm extension ("erase saved lines") -- what `clear` actually sends
             # to wipe scrollback along with the visible screen.
-            self.grid = self._blank_grid(self.rows, self.cols)
+            self.grid = [[self._bce_cell() for _ in range(self.cols)] for _ in range(self.rows)]
             self.scrollback.clear()
 
     def erase_in_line(self, mode: int = 0) -> None:
@@ -349,7 +362,7 @@ class Screen:
     def _erase_line_from(self, row: int, start_col: int, end_col: int | None = None) -> None:
         end = self.cols if end_col is None else end_col
         for c in range(start_col, end):
-            self.grid[row][c] = Cell()
+            self.grid[row][c] = self._bce_cell()
 
     # --- SGR (colors/attributes) ---
 
