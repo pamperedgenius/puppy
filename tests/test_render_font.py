@@ -63,6 +63,13 @@ def test_glyph_id_is_consistent_for_same_char(font):
     assert font.glyph_id_for_char("A") == font.glyph_id_for_char("A")
 
 
+def test_glyph_id_for_char_is_cached_not_reshaped_every_call(font):
+    font.glyph_id_for_char("A")
+    font.glyph_id_for_char("A")
+    font.glyph_id_for_char("B")
+    assert len(font._char_to_glyph_id) == 2
+
+
 def test_rasterize_letter_produces_nonzero_pixel_data(font):
     bitmap = font.rasterize_char("M")
     assert bitmap.width > 0

@@ -1,0 +1,207 @@
+"""GPU cell-grid renderer: one instanced draw call renders every terminal
+cell as a quad sampling its glyph from a GlyphAtlas texture, composited over
+the cell's background with the confirmed premultiplied "over" blend from
+kitty's real alpha-blend.slang (`result = over + under*(1-over.a)`,
+simplified here since bg is always fully opaque: `fg*alpha + bg*(1-alpha)`).
+
+Verified against the real GPU before trusting this design: a partially-inked
+synthetic glyph (left half alpha=255, right half alpha=0) produced exact
+pure-fg-color pixels on the inked half and exact pure-bg-color pixels on the
+transparent half -- proves the whole path (texture upload, storage-buffer
+instance data, uniform buffer, quad generation, UV mapping, fragment blend)
+end to end with real numeric pixel readback, not just "didn't crash."
+
+v1 scope: this is the core blend only. Kitty's real cell.slang also does
+HSLuv-based automatic fg/bg contrast override, cursor/selection compositing,
+underline/strikethrough via decoration sprites, and gamma-adjustment modes --
+none of that is built here, see PROGRESS.md.
+"""
+from __future__ import annotations
+
+import numpy as np
+import wgpu
+
+from .atlas import GlyphAtlas
+from .gpu import GpuContext
+
+_SHADER_SOURCE = """
+struct Instance {
+    col: f32,
+    row: f32,
+    atlas_col: f32,
+    atlas_row: f32,
+    fg: vec4<f32>,
+    bg: vec4<f32>,
+};
+
+struct Uniforms {
+    screen_size: vec2<f32>,
+    cell_size: vec2<f32>,
+    atlas_grid: vec2<f32>,
+    _pad: vec2<f32>,
+};
+
+@group(0) @binding(0) var<storage, read> instances: array<Instance>;
+@group(0) @binding(1) var<uniform> u: Uniforms;
+@group(0) @binding(2) var atlas_tex: texture_2d<f32>;
+@group(0) @binding(3) var atlas_samp: sampler;
+
+struct VOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) fg: vec4<f32>,
+    @location(2) bg: vec4<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vidx: u32, @builtin(instance_index) iidx: u32) -> VOut {
+    let inst = instances[iidx];
+    // 2 triangles, 6 verts: TL, TR, BL / TR, BR, BL
+    var corner_x = array<f32, 6>(0.0, 1.0, 0.0, 1.0, 1.0, 0.0);
+    var corner_y = array<f32, 6>(0.0, 0.0, 1.0, 0.0, 1.0, 1.0);
+    let cx = corner_x[vidx];
+    let cy = corner_y[vidx];
+
+    let px = (inst.col + cx) * u.cell_size.x;
+    let py = (inst.row + cy) * u.cell_size.y;
+    let ndc_x = (px / u.screen_size.x) * 2.0 - 1.0;
+    let ndc_y = 1.0 - (py / u.screen_size.y) * 2.0;
+
+    var out: VOut;
+    out.position = vec4<f32>(ndc_x, ndc_y, 0.0, 1.0);
+    out.uv = vec2<f32>((inst.atlas_col + cx) / u.atlas_grid.x, (inst.atlas_row + cy) / u.atlas_grid.y);
+    out.fg = inst.fg;
+    out.bg = inst.bg;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VOut) -> @location(0) vec4<f32> {
+    let alpha = textureSample(atlas_tex, atlas_samp, in.uv).r;
+    let rgb = in.fg.rgb * alpha + in.bg.rgb * (1.0 - alpha);
+    return vec4<f32>(rgb, 1.0);
+}
+"""
+
+# Must exactly match the WGSL Instance struct's field order/types/alignment.
+INSTANCE_DTYPE = np.dtype(
+    [
+        ("col", "f4"),
+        ("row", "f4"),
+        ("atlas_col", "f4"),
+        ("atlas_row", "f4"),
+        ("fg", "f4", 4),
+        ("bg", "f4", 4),
+    ]
+)
+
+
+class CellRenderer:
+    def __init__(self, gpu: GpuContext, atlas: GlyphAtlas, rows: int, cols: int) -> None:
+        self.gpu = gpu
+        self.atlas = atlas
+        self.rows = rows
+        self.cols = cols
+        device = gpu.device
+
+        shader = device.create_shader_module(code=_SHADER_SOURCE)
+
+        self._atlas_texture = device.create_texture(
+            size=(atlas.width, atlas.height, 1),
+            format=wgpu.TextureFormat.r8unorm,
+            usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST,
+        )
+        self._sampler = device.create_sampler()
+
+        self._instance_buffer = device.create_buffer(
+            size=max(1, rows * cols) * INSTANCE_DTYPE.itemsize,
+            usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
+        )
+
+        # WGSL uniform structs must be 16-byte aligned overall; 3 vec2<f32>
+        # fields (24 bytes) need an explicit pad field to reach 32.
+        uniform_dtype = np.dtype([("screen_size", "f4", 2), ("cell_size", "f4", 2), ("atlas_grid", "f4", 2), ("_pad", "f4", 2)])
+        uniforms = np.zeros(1, dtype=uniform_dtype)
+        uniforms[0] = (
+            (cols * atlas.cell_width, rows * atlas.cell_height),
+            (atlas.cell_width, atlas.cell_height),
+            (atlas.cols, atlas.rows),
+            (0, 0),
+        )
+        self._uniform_buffer = device.create_buffer_with_data(data=uniforms.tobytes(), usage=wgpu.BufferUsage.UNIFORM)
+
+        bind_group_layout = device.create_bind_group_layout(
+            entries=[
+                {"binding": 0, "visibility": wgpu.ShaderStage.VERTEX, "buffer": {"type": wgpu.BufferBindingType.read_only_storage}},
+                {"binding": 1, "visibility": wgpu.ShaderStage.VERTEX, "buffer": {"type": wgpu.BufferBindingType.uniform}},
+                {"binding": 2, "visibility": wgpu.ShaderStage.FRAGMENT, "texture": {"sample_type": wgpu.TextureSampleType.float}},
+                {"binding": 3, "visibility": wgpu.ShaderStage.FRAGMENT, "sampler": {"type": wgpu.SamplerBindingType.filtering}},
+            ]
+        )
+        self._bind_group = device.create_bind_group(
+            layout=bind_group_layout,
+            entries=[
+                {"binding": 0, "resource": {"buffer": self._instance_buffer, "offset": 0, "size": self._instance_buffer.size}},
+                {"binding": 1, "resource": {"buffer": self._uniform_buffer, "offset": 0, "size": self._uniform_buffer.size}},
+                {"binding": 2, "resource": self._atlas_texture.create_view()},
+                {"binding": 3, "resource": self._sampler},
+            ],
+        )
+        pipeline_layout = device.create_pipeline_layout(bind_group_layouts=[bind_group_layout])
+        self._pipeline = device.create_render_pipeline(
+            layout=pipeline_layout,
+            vertex={"module": shader, "entry_point": "vs_main"},
+            fragment={"module": shader, "entry_point": "fs_main", "targets": [{"format": gpu.format}]},
+            primitive={"topology": wgpu.PrimitiveTopology.triangle_list},
+        )
+        self._upload_atlas_full()
+
+    def _upload_atlas_full(self) -> None:
+        self.gpu.device.queue.write_texture(
+            {"texture": self._atlas_texture},
+            self.atlas.image.tobytes(),
+            {"bytes_per_row": self.atlas.width},
+            (self.atlas.width, self.atlas.height, 1),
+        )
+        self.atlas.clear_dirty()
+
+    def sync_atlas(self) -> None:
+        """Uploads only the atlas's dirty region since the last sync, if any."""
+        if self.atlas.dirty_rect is None:
+            return
+        x, y, w, h = self.atlas.dirty_rect
+        region = np.ascontiguousarray(self.atlas.image[y:y + h, x:x + w])
+        self.gpu.device.queue.write_texture(
+            {"texture": self._atlas_texture, "origin": (x, y, 0)},
+            region.tobytes(),
+            {"bytes_per_row": w},
+            (w, h, 1),
+        )
+        self.atlas.clear_dirty()
+
+    def render(self, instances: np.ndarray) -> None:
+        """instances: a structured array with dtype INSTANCE_DTYPE, length
+        <= rows*cols. Uploads any pending atlas changes, updates the instance
+        buffer, and issues one draw call.
+        """
+        self.sync_atlas()
+        device = self.gpu.device
+        device.queue.write_buffer(self._instance_buffer, 0, instances.tobytes())
+        texture_view = self.gpu.context.get_current_texture().create_view()
+        encoder = device.create_command_encoder()
+        pass_ = encoder.begin_render_pass(
+            color_attachments=[
+                {
+                    "view": texture_view,
+                    "resolve_target": None,
+                    "clear_value": (0, 0, 0, 1),
+                    "load_op": wgpu.LoadOp.clear,
+                    "store_op": wgpu.StoreOp.store,
+                }
+            ]
+        )
+        pass_.set_pipeline(self._pipeline)
+        pass_.set_bind_group(0, self._bind_group)
+        pass_.draw(6, len(instances))
+        pass_.end()
+        device.queue.submit([encoder.finish()])

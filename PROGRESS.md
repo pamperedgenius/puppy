@@ -76,22 +76,29 @@ as a trigger for another verification pass, not just a one-time audit.
 
 ## Current status (2026-08-16)
 
-**Rendering has started.** The windowing/GPU toolkit decision (see the Architecture
-decisions log entry — `glfw`+`wgpu-py`/`rendercanvas`+`uharfbuzz`+`freetype-py`) is made
-and a real, working, tested GPU pipeline exists: `GpuContext` (canvas-agnostic
-adapter/device/surface setup) and a live `Window` (GLFW, wraps `GpuContext`). Verified
-against the real GPU and real display in this environment, not just imports: a real
-Wayland-native GLFW window, a real Vulkan adapter (`Intel(R) Graphics (ADL GT2)`), exact
-sRGB-byte-accurate pixel readback (exhaustively across all 256 values, via
-`rendercanvas.offscreen` — no visible window needed for this, real GPU + real numeric
-proof instead), and real HarfBuzz shaping + FreeType rasterization against the actual
-system font. 118 tests passing (up from 110), including 8 new render-layer tests that
-gracefully skip (not fail) under a Python environment that hasn't installed the render
-deps — **but real render work needs `source .venv/bin/activate` from now on**, see the
-Python-environment architecture decision entry. Still no actual glyph/cell-grid drawing —
-what exists today is "a window opens, GPU renders an exact color, font shaping produces
-real glyph data" — the next milestone is putting those three things together into an
-actual visible terminal grid.
+**Rendering works.** The full pipeline from a rasterized glyph to an actual composited
+pixel on screen is built and verified against the real GPU, not mocked: `GpuContext`
+(canvas-agnostic adapter/device/surface setup), `FontRenderer` (real HarfBuzz shaping +
+FreeType rasterization, glyph-id caching), `GlyphAtlas` (packs rasterized glyphs into a
+fixed-cell-size sprite grid — design matches kitty's real sprite atlas, confirmed via its
+`cell.slang`), and `CellRenderer` (an instanced-quad WGSL draw: one draw call renders
+every cell, sampling its glyph from the atlas and compositing fg-over-bg with the
+premultiplied "over" blend confirmed from kitty's real `alpha-blend.slang`). Proven with
+real pixel-exact readback tests, not approximations: a synthetic half-inked glyph produces
+*exact* fg-color pixels where alpha=1 and *exact* bg-color pixels where alpha=0, and a
+real rasterized 'M' from the system's actual default font renders as neither a flat block
+nor a no-op — genuine glyph shape survives the whole pipeline. Two independent cells in
+one draw call render independently (proven, not assumed). 139 tests passing (up from 110
+at the start of this pass), all render-layer tests gracefully skip under a Python
+environment without the render deps — **`source .venv/bin/activate` for real render work
+from now on**, see the Python-environment architecture decision entry.
+
+**Not yet done**: none of this is wired to a live `Window`'s render loop or to an actual
+`Screen` instance yet — what exists is the proven rendering *technology*, tested via
+`rendercanvas.offscreen` with hand-built instance data, not "open `puppy` and see your
+shell." The next step is exactly that wiring — walk `Screen.grid`, shape+atlas-pack each
+cell's `Cell.char`, build the instance array, call `CellRenderer.render` in a live GLFW
+event loop each frame.
 
 Full history of everything before today lives in the dated Milestones checklist below —
 not duplicated here, per this file's own "replace, don't append" rule.
@@ -286,23 +293,35 @@ with the date when something is confirmed working (not just "code exists").
       (whatever fontconfig resolves for `monospace`, portable across
       machines, no hardcoded path), real rasterized pixel data asserted
       non-empty, not just "didn't crash."
-- [ ] Glyph-grid renderer proper — atlas packing (pack rasterized glyphs from
-      `FontRenderer` into a single GPU texture, track each glyph's UV rect) +
-      an instanced-quad WGSL draw (one instance per `Screen` cell) + fg/bg
-      compositing. Checked kitty's *real* current shader source for the
-      compositing formula before building this (`~/Projects/kitty/kitty/
-      shaders/cell.slang` + `alpha-blend.slang` — note: kitty moved from
-      `.glsl` to `.slang` shaders since whenever the research doc's file map
-      was written; `cell_fragment.glsl` doesn't exist in the current clone,
-      correcting that stale reference). Kitty's real shader is far more
-      sophisticated than a v1 needs — HSLuv-based automatic fg/bg contrast
-      override, cursor/selection/underline/strikethrough all composited via a
-      texture *array* atlas, gamma-adjustment modes. **v1 will only port the
-      core premultiplied "over" blend** (`alpha_blend_premul`, confirmed
-      exact formula from `alpha-blend.slang`: `result = over + under*(1-over.a)`)
-      for glyph-alpha-over-background — kitty's contrast-override/cursor/
-      selection sophistication is a deliberate, documented later milestone,
-      not part of this pass.
+- [x] Glyph-grid renderer proper — `src/puppy/render/atlas.py` (`GlyphAtlas`:
+      packs rasterized glyphs into fixed cell-sized slots, baseline-positioned
+      within each slot at blit time — design matches kitty's real sprite atlas,
+      confirmed via `cell.slang`'s `to_sprite_pos`; handles zero-size/oversized
+      glyphs without crashing or corrupting neighboring slots; tracks a dirty
+      rect for incremental GPU re-upload) + `src/puppy/render/cell_renderer.py`
+      (`CellRenderer`: one instanced-quad WGSL draw call renders every cell —
+      storage-buffer instance data, uniform buffer for screen/cell/atlas
+      geometry, texture+sampler binding, fg/bg composited via the
+      premultiplied "over" blend confirmed from kitty's real
+      `alpha-blend.slang`: `result = over + under*(1-over.a)`). Prototyped and
+      verified the whole wgpu-py pipeline shape (storage buffers, bind group
+      layouts, WGSL struct alignment) empirically before writing the real
+      module. Checked kitty's *real* current shader source for the
+      compositing formula (`~/Projects/kitty/kitty/shaders/cell.slang` +
+      `alpha-blend.slang` — correcting a stale assumption: kitty moved from
+      `.glsl` to `.slang` at some point, `cell_fragment.glsl` doesn't exist in
+      the current clone). Kitty's real shader is far more sophisticated than
+      this v1 — HSLuv-based automatic fg/bg contrast override, cursor/
+      selection/underline/strikethrough composited via a texture *array*
+      atlas, gamma-adjustment modes — all deliberately out of scope here, a
+      documented later milestone, not this pass. 2026-08-16, 12 new tests
+      (9 atlas, 3 cell-renderer), all real GPU + real pixel readback: a
+      synthetic half-inked glyph produces *exact* fg pixels where alpha=1 and
+      *exact* bg pixels where alpha=0; a real rasterized 'M' from the actual
+      system font renders as neither a flat block nor a no-op; two cells in
+      one draw call render independently. **Not yet wired to a live `Window`
+      render loop or a real `Screen` instance** — proven technology, not yet
+      "open puppy and see your shell," see Current status.
 - [ ] Key/mouse event capture wired to the live `Window` (GLFW callbacks ->
       `puppy.mouse.generate_mouse_report` for mouse, and the eventual kitty
       keyboard protocol encoder for keys) — `PtySession.write` is the
@@ -338,6 +357,8 @@ puppy/
       color.py                sRGB<->linear conversion (GPU wants linear, themes are sRGB)
       window.py                live GLFW window wrapping GpuContext, lifecycle only
       font.py                   FontRenderer — HarfBuzz shape + FreeType rasterize + cache
+      atlas.py                   GlyphAtlas — packs glyphs into fixed cell-sized slots
+      cell_renderer.py            CellRenderer — instanced-quad WGSL draw, fg/bg compositing
   terminfo/
     puppy.terminfo       terminfo source, use=xterm-256color + real overrides
   scripts/
@@ -347,6 +368,8 @@ puppy/
     test_screen.py
     test_mouse.py
     test_render_font.py   real shaping/rasterization, portable (fc-match, no hardcoded font)
+    test_render_atlas.py   pure packing/blit logic, no GPU needed
+    test_render_cell_renderer.py  real GPU + real pixel readback, exact-color proofs
     test_render_color.py  pure sRGB/linear math, no GPU needed
     test_render_gpu.py     real wgpu + offscreen canvas, real pixel readback, skips if no adapter
 ```
@@ -357,19 +380,17 @@ puppy/
 dependencies live there, not in system Python. `pip install -e .` again if the venv
 is ever recreated (it's gitignored).
 
-1. Atlas packing + the actual instanced-quad draw, now that shaping/rasterization
-   (`FontRenderer`) is done and tested: pack rasterized `GlyphBitmap`s into a single
-   GPU texture (track each glyph's UV rect, upload sub-regions via
-   `device.queue.write_texture` as new glyphs appear rather than re-uploading
-   everything), then one instanced draw call per frame renders every `Screen` cell as
-   a textured quad — glyph alpha sampled from the atlas, composited over `Cell.bg`
-   with `Cell.fg` using the confirmed premultiplied "over" formula from kitty's real
-   `alpha-blend.slang` (`result = over + under*(1-over.a)`), colors through
-   `srgb_color` per the linear-vs-sRGB decision above. **v1 scope**: just this core
-   blend — kitty's real `cell.slang` also does HSLuv-based automatic fg/bg contrast
-   override, cursor/selection compositing, and gamma-adjustment modes, all
-   deliberately deferred, not part of this pass (see the Milestones entry). This is
-   the actual "does puppy look like a terminal yet" milestone.
+1. **Wire it all together: `Screen` -> live `Window` render loop.** Everything
+   needed exists and is tested in isolation (`PtySession`, `Parser`, `Screen`,
+   `FontRenderer`, `GlyphAtlas`, `CellRenderer`) but nothing has been connected into
+   an actual running program yet. Concretely: a loop that (a) reads `PtySession`
+   output, feeds it through `Parser` into `Screen` (already exactly what
+   `__main__.py`'s pass-through harness does), (b) each frame, walks `Screen.grid`,
+   for each `Cell` calls `font.glyph_id_for_char`/`atlas.get_or_add` and builds the
+   `INSTANCE_DTYPE` array (colors through `srgb_color`, per the linear-vs-sRGB
+   decision), (c) calls `CellRenderer.render(instances)`, (d) polls the `Window` for
+   close/resize. This is the actual "run puppy and see your shell render" milestone
+   — everything before it was proving the pieces work, this is making them a program.
 2. Wire real key/mouse events into the live `Window`: GLFW's `set_key_callback`
    (press/repeat/release natively — exactly what the kitty keyboard protocol needs)
    and `set_mouse_button_callback`/`set_cursor_pos_callback`/`set_scroll_callback` for

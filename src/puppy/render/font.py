@@ -54,22 +54,28 @@ class FontRenderer:
         self.cell_height = self.ascender - descender
 
         self._glyph_cache: dict[int, GlyphBitmap] = {}
+        self._char_to_glyph_id: dict[str, int] = {}
 
     def glyph_id_for_char(self, ch: str) -> int:
-        """Shapes a single character and returns its glyph id. If shaping
+        """Shapes a single character and returns its glyph id, cached by
+        character -- a real-time renderer calling this every frame for every
+        visible cell must not re-run HarfBuzz shaping each time. If shaping
         produces more than one glyph (a real possibility for some combining-
         mark/complex-script input even for one input character), only the
         first is used -- multi-glyph-per-character shaping isn't handled yet,
         see the module docstring's scope limit.
         """
+        cached = self._char_to_glyph_id.get(ch)
+        if cached is not None:
+            return cached
         buf = hb.Buffer()
         buf.add_str(ch)
         buf.guess_segment_properties()
         hb.shape(self._hb_font, buf)
         infos = buf.glyph_infos
-        if not infos:
-            return 0  # .notdef
-        return infos[0].codepoint  # HarfBuzz repurposes this field as glyph id post-shaping
+        glyph_id = infos[0].codepoint if infos else 0  # 0 = .notdef
+        self._char_to_glyph_id[ch] = glyph_id
+        return glyph_id
 
     def rasterize(self, glyph_id: int) -> GlyphBitmap:
         cached = self._glyph_cache.get(glyph_id)
