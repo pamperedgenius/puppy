@@ -4,13 +4,14 @@ CellRenderer -> a live Window into an actual running program. This is what
 __main__.py remains the separate, already-tested, headless-friendly way to
 validate the PTY/parser/screen layers without a GPU/display.
 
-v1 scope: full-grid redraw every frame (no dirty-cell tracking), no key/mouse
-input wired yet (see PROGRESS.md's next steps), colors resolved via
-puppy.render.palette (ansi256 + Screen.palette OSC-4 overrides), reverse video
-handled by swapping fg/bg, bold/underline attributes not yet visually
-rendered (no bold font variant or underline decoration sprite built yet --
-deliberate, documented gap, matching the same scoping as the rest of this
-render pass).
+v1 scope: full-grid redraw every frame (no dirty-cell tracking), colors
+resolved via puppy.render.palette (ansi256 + Screen.palette OSC-4 overrides),
+reverse video handled by swapping fg/bg, bold/underline attributes not yet
+visually rendered (no bold font variant or underline decoration sprite built
+yet -- deliberate, documented gap, matching the same scoping as the rest of
+this render pass). Key/mouse input is wired via puppy.render.input_state's
+InputState -- legacy (non-kitty-protocol) key encoding for now, see
+puppy.keyboard's module docstring for that scope limit.
 """
 from __future__ import annotations
 
@@ -27,6 +28,7 @@ from .atlas import GlyphAtlas
 from .cell_renderer import INSTANCE_DTYPE, CellRenderer
 from .color import srgb_color
 from .font import FontRenderer
+from .input_state import InputState
 from .palette import resolve_color
 from .window import Window
 
@@ -73,6 +75,13 @@ def run(rows: int = 24, cols: int = 80, pixel_size: int = 16) -> None:
     screen = Screen(rows, cols)
     parser = Parser(screen)
     session = PtySession(rows=rows, cols=cols)
+
+    input_state = InputState(session, screen, font)
+    window.set_key_handler(input_state.on_key)
+    window.set_char_handler(input_state.on_char)
+    window.set_mouse_button_handler(input_state.on_mouse_button)
+    window.set_cursor_pos_handler(input_state.on_cursor_pos)
+    window.set_scroll_handler(input_state.on_scroll)
 
     def draw_frame() -> None:
         renderer.render(build_instances(screen, font, atlas))

@@ -76,52 +76,46 @@ as a trigger for another verification pass, not just a one-time audit.
 
 ## Current status (2026-08-16)
 
-**Rendering works.** The full pipeline from a rasterized glyph to an actual composited
-pixel on screen is built and verified against the real GPU, not mocked: `GpuContext`
-(canvas-agnostic adapter/device/surface setup), `FontRenderer` (real HarfBuzz shaping +
-FreeType rasterization, glyph-id caching), `GlyphAtlas` (packs rasterized glyphs into a
-fixed-cell-size sprite grid — design matches kitty's real sprite atlas, confirmed via its
-`cell.slang`), and `CellRenderer` (an instanced-quad WGSL draw: one draw call renders
-every cell, sampling its glyph from the atlas and compositing fg-over-bg with the
-premultiplied "over" blend confirmed from kitty's real `alpha-blend.slang`). Proven with
-real pixel-exact readback tests, not approximations: a synthetic half-inked glyph produces
-*exact* fg-color pixels where alpha=1 and *exact* bg-color pixels where alpha=0, and a
-real rasterized 'M' from the system's actual default font renders as neither a flat block
-nor a no-op — genuine glyph shape survives the whole pipeline. Two independent cells in
-one draw call render independently (proven, not assumed). 139 tests passing (up from 110
-at the start of this pass), all render-layer tests gracefully skip under a Python
-environment without the render deps — **`source .venv/bin/activate` for real render work
-from now on**, see the Python-environment architecture decision entry.
+**puppy is a real, runnable, typeable-into program.** `python -m puppy.render.app` opens
+a live GLFW/wgpu window, spawns a real shell in a real PTY, renders the full grid every
+frame (glyph shaping/rasterization/atlas-packing -> instanced GPU draw, real colors via
+`puppy.render.palette`), and now accepts real keyboard/mouse input: raw GLFW callbacks
+(bypassing `rendercanvas`'s own event abstraction, which silently drops key-repeat
+events — see the Architecture decisions log) feed `puppy.render.input_state.InputState`,
+which encodes legacy key sequences (`puppy.keyboard`) and SGR mouse reports
+(`puppy.mouse`, built earlier) and writes them to the PTY. Verified with two deliberate
+brief live runs (not repeated): the app starts and runs continuously with no crash before
+and after wiring input. 183 tests passing (up from 110 at the very start of the rendering
+push). `source .venv/bin/activate` for any of this — see the Python-environment
+architecture decision entry.
 
-**It's wired together and runs.** `src/puppy/render/app.py` connects every existing
-piece into an actual program: `PtySession` -> `Parser` -> `Screen` -> (per cell)
-`FontRenderer`/`GlyphAtlas` -> `CellRenderer` -> a live `Window`, redrawing every cell
-every frame. `python -m puppy.render.app` opens a real window, spawns a real shell in a
-real PTY, and runs the loop continuously — verified with one deliberate 3-second live run
-(not repeated, per the live-window-testing rule): no crash, no traceback, just the
-already-known-harmless `libdecor-gtk` warning. Colors resolve through a new
-`puppy.render.palette` module (the standard ANSI 256-color table + `Screen.palette`
-OSC-4-override parsing, `#rrggbb` and X11 `rgb:rr/gg/bb` spec formats) rather than being
-made up. **Real bug found and fixed while building this**: `Screen.sgr()` was storing
-basic SGR color codes (30-37/90-97) as their *raw attribute number*, which overlaps with
-true 256-color palette indices in the same numeric range (e.g. `fg=35` was ambiguous
-between "SGR magenta" and "256-color index 35," a genuinely different color) — confirmed
-real and fixed by normalizing to the same 0-15 index kitty's real `cursor_from_sgr`
-(`cursor.c`: `case 30...37: fg = (attr-30)<<8|1`) uses, not assumed. This was a real
-correctness bug sitting in `Screen` since very early in the project, only surfaced now
-because the renderer needed an unambiguous color model to resolve against. 161 tests
-passing (up from 110 at the start of this pass).
-
-**Not yet done**: no key/mouse input wired to the live `Window` yet (window opens, shell
-runs, but you can't type into it) — that's the next milestone. Bold/underline are parsed
-into `Cell` correctly but not yet visually rendered (no bold font variant or underline
-decoration sprite built) — a deliberate, documented v1 gap, not an oversight.
+**Known gaps, all deliberate and documented** (not oversights): no kitty keyboard
+protocol yet (legacy encoding only — `puppy.keyboard`'s docstring); no Alt/Meta-prefixed
+key sequences, no Ctrl+non-letter combos, no Shift+function-key variants; bold/underline
+parse into `Cell` correctly but aren't visually rendered (no bold font variant or
+underline decoration sprite); not launchable from wofi/as a desktop app yet (no
+`.desktop` file — it's a Python module run directly, not an installed application; worth
+doing once the app is further along, not before).
 
 Full history of everything before today lives in the dated Milestones checklist below —
 not duplicated here, per this file's own "replace, don't append" rule.
 
 ## Architecture decisions log
 
+- **Input bypasses `rendercanvas`'s own event abstraction; raw GLFW callbacks are
+  registered directly on the underlying window handle instead.** Checked
+  `rendercanvas`'s real installed source (`rendercanvas/glfw.py`) before building input
+  handling, not assumed: its own `_on_key` handler silently discards every
+  `GLFW_REPEAT` event (`else: # glfw.REPEAT / return`) as part of normalizing input
+  into a cross-toolkit event schema — exactly the press/repeat/release granularity
+  puppy chose GLFW specifically to get (the whole point, for the future kitty keyboard
+  protocol). `Window`'s `set_key_handler`/`set_char_handler`/`set_mouse_button_handler`/
+  `set_cursor_pos_handler`/`set_scroll_handler` call `glfw.set_*_callback` directly on
+  `canvas._window` (a private rendercanvas attribute — deliberate, no public accessor
+  exists, confirmed via introspection). Verified safe: `rendercanvas` registers
+  *separate* callbacks for resize/close/focus/iconify that this doesn't touch, and the
+  6 input callbacks being replaced are only used internally for the abstraction being
+  deliberately bypassed, not anything render-loop-critical.
 - **`Cell.fg`/`Cell.bg` int values are always a 0-255 palette index, normalized at SGR-
   parse time — never a raw SGR attribute code.** Real bug, found and fixed 2026-08-16
   while building the renderer's color resolution (`puppy.render.palette`), which needed
@@ -370,10 +364,19 @@ with the date when something is confirmed working (not just "code exists").
       yet; that's the next milestone. Bold/underline parse correctly into
       `Cell` but aren't visually rendered yet (no bold font variant or
       underline decoration sprite) — a deliberate, documented gap.
-- [ ] Key/mouse event capture wired to the live `Window` (GLFW callbacks ->
-      `puppy.mouse.generate_mouse_report` for mouse, and the eventual kitty
-      keyboard protocol encoder for keys) — `PtySession.write` is the
-      already-existing sink, just needs a real source now that one exists.
+- [x] Key/mouse event capture wired to the live `Window` — real GLFW callbacks
+      (bypassing `rendercanvas`'s own event abstraction, which drops key-repeat
+      events, see Architecture decisions log) feed `src/puppy/render/
+      input_state.py`'s `InputState`, which encodes via `src/puppy/keyboard.py`
+      (new: legacy xterm/VT220-style key encoding — DECCKM-aware normal/
+      application-mode arrows, Home/End/PageUp/PageDown/Insert/
+      Delete/F1-F12/Enter/Backspace/Tab/Escape taken from puppy's own compiled
+      terminfo entry, Ctrl+A-Z control bytes) and `puppy.mouse` (already built)
+      and writes to `PtySession`. 2026-08-16, 22 new tests (10 keyboard, 12
+      input-state via a stub session, no real PTY needed). Verified live: the
+      wired-up app still starts and runs continuously with no crash. Documented
+      v1 gaps: no Alt/Meta-prefixed sequences, no Ctrl+non-letter combos, no
+      Shift+function-key variants.
 - [ ] Kitty keyboard protocol (CSI u) — encoding logic can now be built
       against real GLFW key/scancode/modifier events (`glfw.set_key_callback`
       gives press/repeat/release natively), following the same
@@ -398,16 +401,18 @@ puppy/
     pty_session.py       PtySession — spawn/read/write/resize a real PTY
     parser.py            Parser — byte-level VT/ANSI state machine
     screen.py             Screen, Cell — in-memory grid + cursor + SGR attrs
-    mouse.py               SGR mouse-event encoding, no event source wired up yet
+    mouse.py               SGR mouse-event encoding (puppy.mouse)
+    keyboard.py             legacy GLFW-key -> byte-sequence encoding
     render/
       __init__.py          toolkit-choice rationale pointer
       gpu.py                 GpuContext — canvas-agnostic adapter/device/surface + clear()
       color.py                sRGB<->linear conversion (GPU wants linear, themes are sRGB)
-      window.py                live GLFW window wrapping GpuContext, lifecycle only
+      window.py                live GLFW window + raw input-callback registration
       font.py                   FontRenderer — HarfBuzz shape + FreeType rasterize + cache
       atlas.py                   GlyphAtlas — packs glyphs into fixed cell-sized slots
       cell_renderer.py            CellRenderer — instanced-quad WGSL draw, fg/bg compositing
       palette.py                   ANSI 256-color table + OSC-4 spec parsing -> RGB
+      input_state.py                InputState — GLFW callback data -> PTY bytes
       app.py                        run()/build_instances() — the actual wired-up program
   terminfo/
     puppy.terminfo       terminfo source, use=xterm-256color + real overrides
@@ -417,6 +422,7 @@ puppy/
     test_parser.py
     test_screen.py
     test_mouse.py
+    test_keyboard.py       legacy key-encoding correctness, no GPU/window needed
     test_render_font.py   real shaping/rasterization, portable (fc-match, no hardcoded font)
     test_render_atlas.py   pure packing/blit logic, no GPU needed
     test_render_cell_renderer.py  real GPU + real pixel readback, exact-color proofs
@@ -424,6 +430,7 @@ puppy/
     test_render_gpu.py     real wgpu + offscreen canvas, real pixel readback, skips if no adapter
     test_render_palette.py  ANSI-256/OSC-4-spec-parsing correctness, no GPU needed
     test_render_app.py      build_instances() correctness, no GPU needed (font/atlas only)
+    test_render_input_state.py  InputState correctness via a stub session, no real PTY
 ```
 
 ## Next steps (pick up here)
@@ -432,23 +439,25 @@ puppy/
 dependencies live there, not in system Python. `pip install -e .` again if the venv
 is ever recreated (it's gitignored).
 
-1. **Wire real key/mouse events into the live `Window`.** `python -m puppy.render.app`
-   opens a window and runs a real shell, but nothing typed reaches it — GLFW's
-   `set_key_callback` (press/repeat/release natively — exactly what the kitty keyboard
-   protocol needs) and `set_mouse_button_callback`/`set_cursor_pos_callback`/
-   `set_scroll_callback` for mouse, feeding `puppy.mouse.generate_mouse_report`
-   (already built) and `PtySession.write` (already built) into `session.write(...)` —
-   this is mostly plumbing two already-tested halves together, not new protocol logic.
-   This is the actual "type into puppy and it works" milestone.
-2. Then the kitty keyboard protocol itself (CSI u encoding) — same pattern as
-   `mouse.py`: a pure `encode_*_event` function unit-tested against known byte
-   sequences, verified against kitty's real `keys.c`/`key_encoding.c` before trusting
-   the encoding (same verification discipline used throughout this project).
-3. Bold/underline visual rendering (currently parsed into `Cell` correctly but not
+1. **The kitty keyboard protocol itself (CSI u encoding)** — legacy key encoding is
+   done (`puppy.keyboard`), this is the layer on top: same pattern as `mouse.py`, a
+   pure `encode_*_event` function unit-tested against known byte sequences, verified
+   against kitty's real `keys.c`/`key_encoding.c` before trusting the encoding (same
+   verification discipline used throughout this project). Needs a way for the running
+   program to request it (`CSI = flags ; mode u`, already the kind of thing
+   `Screen`/`Parser` handle for other DEC private-mode-adjacent requests) and a
+   progressive-enhancement flag state to track per screen (main vs alt, per the real
+   spec captured in the original research doc).
+2. Bold/underline visual rendering (currently parsed into `Cell` correctly but not
    drawn) — needs either a second "bold" atlas keyed by (glyph_id, bold) pairs (simplest,
    doubles atlas memory for bold-using glyphs) or a synthetic bold (fatten the rasterized
    bitmap, lower fidelity but no second font load) for bold, and an underline decoration
    quad/sprite for underline. Not yet designed in detail.
+3. A `.desktop` file + wofi/launcher integration, once the app is further along —
+   right now it's a bare Python module (`python -m puppy.render.app`), not an installed
+   application, which is why it doesn't show up in wofi. Low effort whenever it's worth
+   doing (a `.desktop` entry pointing at a small wrapper script that activates the venv
+   and runs the module), just not a priority while core functionality is still landing.
 4. Separately, whenever there's a spare cycle: live-test `TERM=puppy python -m
    puppy` (the *text* pass-through harness, `__main__.py`) in a real terminal window (a
    real ncurses/vim session using the terminfo entry, not just `curses.setupterm()`

@@ -1,8 +1,19 @@
 """A live GLFW window wrapping a GpuContext -- the interactive counterpart to
 the offscreen canvas the tests use. No pytest coverage here (needs a real
-display); see PROGRESS.md for the live-test status. Key/mouse-event callback
-wiring (toward puppy.mouse's SGR encoder, and eventually the kitty keyboard
-protocol) is the next slice, not built yet -- this is window lifecycle only.
+display); see PROGRESS.md for the live-test status.
+
+Input handlers register *raw* GLFW callbacks directly on the underlying GLFW
+window handle (`self.canvas._window`, a private rendercanvas attribute --
+deliberate, verified, not an oversight: rendercanvas.glfw's own key handler
+silently *drops every GLFW_REPEAT event* (confirmed by reading its source,
+`_on_key`'s `else: # glfw.REPEAT / return`), which is exactly the granularity
+puppy chose GLFW for -- the kitty keyboard protocol needs real press/repeat/
+release. Using rendercanvas's higher-level event abstraction would silently
+defeat that. Confirmed safe to override: rendercanvas registers *separate*
+callbacks for resize/close/focus/iconify that this doesn't touch, only the
+6 input callbacks (key/char/mouse-button/cursor-pos/scroll/cursor-enter) are
+replaced, and those are only used internally for rendercanvas's own discarded
+input abstraction, not anything render-loop-critical.
 """
 from __future__ import annotations
 
@@ -19,6 +30,10 @@ class Window:
         self.canvas = RenderCanvas(size=(width, height), title=title)
         self.gpu = GpuContext.create(self.canvas)
 
+    @property
+    def _glfw_handle(self):
+        return self.canvas._window
+
     def should_close(self) -> bool:
         return self.canvas.get_closed()
 
@@ -28,3 +43,29 @@ class Window:
     def close(self) -> None:
         if not self.canvas.get_closed():
             self.canvas.close()
+
+    # --- raw input callbacks (see module docstring for why these bypass
+    # rendercanvas's own event abstraction) ---
+
+    def set_key_handler(self, handler) -> None:
+        """handler(key: int, scancode: int, action: int, mods: int) -- action
+        is glfw.PRESS/RELEASE/REPEAT, all three delivered (unlike
+        rendercanvas's own handler)."""
+        glfw.set_key_callback(self._glfw_handle, lambda _win, k, s, a, m: handler(k, s, a, m))
+
+    def set_char_handler(self, handler) -> None:
+        """handler(codepoint: int) -- only fires for actual text-producing
+        key presses, already respecting layout/shift/IME."""
+        glfw.set_char_callback(self._glfw_handle, lambda _win, cp: handler(cp))
+
+    def set_mouse_button_handler(self, handler) -> None:
+        """handler(button: int, action: int, mods: int)."""
+        glfw.set_mouse_button_callback(self._glfw_handle, lambda _win, b, a, m: handler(b, a, m))
+
+    def set_cursor_pos_handler(self, handler) -> None:
+        """handler(xpos: float, ypos: float) -- window-relative pixel coords."""
+        glfw.set_cursor_pos_callback(self._glfw_handle, lambda _win, x, y: handler(x, y))
+
+    def set_scroll_handler(self, handler) -> None:
+        """handler(xoffset: float, yoffset: float)."""
+        glfw.set_scroll_callback(self._glfw_handle, lambda _win, x, y: handler(x, y))
