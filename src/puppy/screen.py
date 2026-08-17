@@ -393,9 +393,18 @@ class Screen:
             elif p == 49:
                 self._sgr["bg"] = None
             elif p in self._SGR_COLORS_FG:
-                self._sgr["fg"] = p
+                # Normalized to the same 0-15 index space the 256-color path
+                # (38;5;n) uses, not stored as the raw 30-37/90-97 attribute
+                # code -- confirmed against kitty's real cursor_from_sgr
+                # (cursor.c): `case 30...37: fg = (attr-30)<<8|1`, same tag as
+                # the 256-color path. Storing the raw code would make fg=35
+                # ambiguous between "SGR magenta" and "256-color index 35"
+                # (a real, different color) -- a genuine bug, not a style
+                # choice, caught while building the renderer's color
+                # resolution and needing an unambiguous 0-255 index meaning.
+                self._sgr["fg"] = (p - 30) if p < 90 else (p - 90 + 8)
             elif p in self._SGR_COLORS_BG:
-                self._sgr["bg"] = p
+                self._sgr["bg"] = (p - 40) if p < 100 else (p - 100 + 8)
             elif p in (38, 48) and i + 1 < len(params):
                 target = "fg" if p == 38 else "bg"
                 mode = params[i + 1]

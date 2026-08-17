@@ -93,18 +93,50 @@ at the start of this pass), all render-layer tests gracefully skip under a Pytho
 environment without the render deps — **`source .venv/bin/activate` for real render work
 from now on**, see the Python-environment architecture decision entry.
 
-**Not yet done**: none of this is wired to a live `Window`'s render loop or to an actual
-`Screen` instance yet — what exists is the proven rendering *technology*, tested via
-`rendercanvas.offscreen` with hand-built instance data, not "open `puppy` and see your
-shell." The next step is exactly that wiring — walk `Screen.grid`, shape+atlas-pack each
-cell's `Cell.char`, build the instance array, call `CellRenderer.render` in a live GLFW
-event loop each frame.
+**It's wired together and runs.** `src/puppy/render/app.py` connects every existing
+piece into an actual program: `PtySession` -> `Parser` -> `Screen` -> (per cell)
+`FontRenderer`/`GlyphAtlas` -> `CellRenderer` -> a live `Window`, redrawing every cell
+every frame. `python -m puppy.render.app` opens a real window, spawns a real shell in a
+real PTY, and runs the loop continuously — verified with one deliberate 3-second live run
+(not repeated, per the live-window-testing rule): no crash, no traceback, just the
+already-known-harmless `libdecor-gtk` warning. Colors resolve through a new
+`puppy.render.palette` module (the standard ANSI 256-color table + `Screen.palette`
+OSC-4-override parsing, `#rrggbb` and X11 `rgb:rr/gg/bb` spec formats) rather than being
+made up. **Real bug found and fixed while building this**: `Screen.sgr()` was storing
+basic SGR color codes (30-37/90-97) as their *raw attribute number*, which overlaps with
+true 256-color palette indices in the same numeric range (e.g. `fg=35` was ambiguous
+between "SGR magenta" and "256-color index 35," a genuinely different color) — confirmed
+real and fixed by normalizing to the same 0-15 index kitty's real `cursor_from_sgr`
+(`cursor.c`: `case 30...37: fg = (attr-30)<<8|1`) uses, not assumed. This was a real
+correctness bug sitting in `Screen` since very early in the project, only surfaced now
+because the renderer needed an unambiguous color model to resolve against. 161 tests
+passing (up from 110 at the start of this pass).
+
+**Not yet done**: no key/mouse input wired to the live `Window` yet (window opens, shell
+runs, but you can't type into it) — that's the next milestone. Bold/underline are parsed
+into `Cell` correctly but not yet visually rendered (no bold font variant or underline
+decoration sprite built) — a deliberate, documented v1 gap, not an oversight.
 
 Full history of everything before today lives in the dated Milestones checklist below —
 not duplicated here, per this file's own "replace, don't append" rule.
 
 ## Architecture decisions log
 
+- **`Cell.fg`/`Cell.bg` int values are always a 0-255 palette index, normalized at SGR-
+  parse time — never a raw SGR attribute code.** Real bug, found and fixed 2026-08-16
+  while building the renderer's color resolution (`puppy.render.palette`), which needed
+  an unambiguous meaning for these ints. `Screen.sgr()` used to store basic-color SGR
+  codes (30-37/90-97) as-is; since `38;5;n` (256-color) also stores a raw 0-255 index in
+  the *same field*, values 30-37/90-97 were ambiguous between "basic SGR color" and "a
+  different, specific 256-color palette entry." Confirmed and fixed against kitty's real
+  `cursor_from_sgr` (`cursor.c`): `case 30...37: fg = (attr-30)<<8|1` — same tag as the
+  256-color path, i.e. kitty normalizes basic colors into indices 0-15 of the *same*
+  unified space, never stores the raw code. `Screen.sgr()` now does the same
+  (`p - 30` / `p - 90 + 8` for fg, `p - 40` / `p - 100 + 8` for bg). Affected 5 existing
+  test assertions (fixed to expect the normalized index, e.g. `\e[41m` -> `bg == 1`, not
+  `41`) — a real behavior change, not just an internal refactor, so anything reading
+  `Cell.fg`/`bg` directly (only the renderer does, so far) must treat it as this
+  unified 0-255 index space.
 - **Rendering/windowing toolkit: DECIDED 2026-08-16 — `glfw` + `wgpu-py`/`rendercanvas`
   + `uharfbuzz` + `freetype-py`.** Long back-and-forth, worth recording in full since it
   won't be re-litigated without a real reason:
@@ -322,6 +354,22 @@ with the date when something is confirmed working (not just "code exists").
       one draw call render independently. **Not yet wired to a live `Window`
       render loop or a real `Screen` instance** — proven technology, not yet
       "open puppy and see your shell," see Current status.
+- [x] **Wired into an actual running program** — `src/puppy/render/app.py`
+      (`run()`/`build_instances()`): `PtySession` -> `Parser` -> `Screen` ->
+      per-cell `FontRenderer`/`GlyphAtlas` lookup -> `CellRenderer`, redrawing
+      the full grid every frame in a live GLFW loop. `python -m
+      puppy.render.app` opens a real window and runs a real shell —
+      confirmed with one deliberate 3-second live run, no crash/traceback.
+      Also added `puppy.render.palette` (ANSI 256-color table +
+      OSC-4-override spec parsing) to resolve `Cell.fg`/`bg` into real RGB,
+      which surfaced and fixed a real pre-existing bug in `Screen.sgr()`
+      (basic SGR color codes were stored ambiguously with 256-color
+      indices — see the Architecture decisions log entry). 2026-08-16, 22
+      new tests (14 palette, 8 app-wiring). **Still no key/mouse input** —
+      the window opens and the shell runs, but nothing you type reaches it
+      yet; that's the next milestone. Bold/underline parse correctly into
+      `Cell` but aren't visually rendered yet (no bold font variant or
+      underline decoration sprite) — a deliberate, documented gap.
 - [ ] Key/mouse event capture wired to the live `Window` (GLFW callbacks ->
       `puppy.mouse.generate_mouse_report` for mouse, and the eventual kitty
       keyboard protocol encoder for keys) — `PtySession.write` is the
@@ -359,6 +407,8 @@ puppy/
       font.py                   FontRenderer — HarfBuzz shape + FreeType rasterize + cache
       atlas.py                   GlyphAtlas — packs glyphs into fixed cell-sized slots
       cell_renderer.py            CellRenderer — instanced-quad WGSL draw, fg/bg compositing
+      palette.py                   ANSI 256-color table + OSC-4 spec parsing -> RGB
+      app.py                        run()/build_instances() — the actual wired-up program
   terminfo/
     puppy.terminfo       terminfo source, use=xterm-256color + real overrides
   scripts/
@@ -372,6 +422,8 @@ puppy/
     test_render_cell_renderer.py  real GPU + real pixel readback, exact-color proofs
     test_render_color.py  pure sRGB/linear math, no GPU needed
     test_render_gpu.py     real wgpu + offscreen canvas, real pixel readback, skips if no adapter
+    test_render_palette.py  ANSI-256/OSC-4-spec-parsing correctness, no GPU needed
+    test_render_app.py      build_instances() correctness, no GPU needed (font/atlas only)
 ```
 
 ## Next steps (pick up here)
@@ -380,28 +432,25 @@ puppy/
 dependencies live there, not in system Python. `pip install -e .` again if the venv
 is ever recreated (it's gitignored).
 
-1. **Wire it all together: `Screen` -> live `Window` render loop.** Everything
-   needed exists and is tested in isolation (`PtySession`, `Parser`, `Screen`,
-   `FontRenderer`, `GlyphAtlas`, `CellRenderer`) but nothing has been connected into
-   an actual running program yet. Concretely: a loop that (a) reads `PtySession`
-   output, feeds it through `Parser` into `Screen` (already exactly what
-   `__main__.py`'s pass-through harness does), (b) each frame, walks `Screen.grid`,
-   for each `Cell` calls `font.glyph_id_for_char`/`atlas.get_or_add` and builds the
-   `INSTANCE_DTYPE` array (colors through `srgb_color`, per the linear-vs-sRGB
-   decision), (c) calls `CellRenderer.render(instances)`, (d) polls the `Window` for
-   close/resize. This is the actual "run puppy and see your shell render" milestone
-   — everything before it was proving the pieces work, this is making them a program.
-2. Wire real key/mouse events into the live `Window`: GLFW's `set_key_callback`
-   (press/repeat/release natively — exactly what the kitty keyboard protocol needs)
-   and `set_mouse_button_callback`/`set_cursor_pos_callback`/`set_scroll_callback` for
-   mouse, feeding `puppy.mouse.generate_mouse_report` (already built) and
-   `PtySession.write` (already built) — this is mostly plumbing two already-tested
-   halves together, not new protocol logic.
-3. Then the kitty keyboard protocol itself (CSI u encoding) — same pattern as
+1. **Wire real key/mouse events into the live `Window`.** `python -m puppy.render.app`
+   opens a window and runs a real shell, but nothing typed reaches it — GLFW's
+   `set_key_callback` (press/repeat/release natively — exactly what the kitty keyboard
+   protocol needs) and `set_mouse_button_callback`/`set_cursor_pos_callback`/
+   `set_scroll_callback` for mouse, feeding `puppy.mouse.generate_mouse_report`
+   (already built) and `PtySession.write` (already built) into `session.write(...)` —
+   this is mostly plumbing two already-tested halves together, not new protocol logic.
+   This is the actual "type into puppy and it works" milestone.
+2. Then the kitty keyboard protocol itself (CSI u encoding) — same pattern as
    `mouse.py`: a pure `encode_*_event` function unit-tested against known byte
    sequences, verified against kitty's real `keys.c`/`key_encoding.c` before trusting
    the encoding (same verification discipline used throughout this project).
+3. Bold/underline visual rendering (currently parsed into `Cell` correctly but not
+   drawn) — needs either a second "bold" atlas keyed by (glyph_id, bold) pairs (simplest,
+   doubles atlas memory for bold-using glyphs) or a synthetic bold (fatten the rasterized
+   bitmap, lower fidelity but no second font load) for bold, and an underline decoration
+   quad/sprite for underline. Not yet designed in detail.
 4. Separately, whenever there's a spare cycle: live-test `TERM=puppy python -m
-   puppy` in a real terminal window (a real ncurses/vim session using the terminfo
-   entry, not just `curses.setupterm()` accepting it headlessly) — still pending,
-   needs an interactive session, not blocking the render work above.
+   puppy` (the *text* pass-through harness, `__main__.py`) in a real terminal window (a
+   real ncurses/vim session using the terminfo entry, not just `curses.setupterm()`
+   accepting it headlessly) — still pending, needs an interactive session, unrelated to
+   the GPU render work above (that's `python -m puppy.render.app`, a separate program).

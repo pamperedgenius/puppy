@@ -361,34 +361,34 @@ def test_set_hyperlink_attaches_and_clears():
 
 def test_erase_in_line_applies_current_sgr_bce():
     s = Screen(rows=1, cols=3)
-    s.sgr([41])  # red background
+    s.sgr([41])  # red background -> normalized index 1 (see the sgr() color-index fix)
     s.erase_in_line(2)
-    assert s.grid[0][0].bg == 41
+    assert s.grid[0][0].bg == 1
     assert s.grid[0][0].char == " "
 
 
 def test_erase_in_display_mode_2_applies_current_sgr_bce():
     s = Screen(rows=2, cols=2)
-    s.sgr([44])  # blue background
+    s.sgr([44])  # blue background -> normalized index 4
     s.erase_in_display(2)
-    assert all(cell.bg == 44 for row in s.grid for cell in row)
+    assert all(cell.bg == 4 for row in s.grid for cell in row)
 
 
 def test_erase_in_display_mode_3_applies_current_sgr_bce():
     s = Screen(rows=1, cols=2)
     s.sgr([44])
     s.erase_in_display(3)
-    assert all(cell.bg == 44 for cell in s.grid[0])
+    assert all(cell.bg == 4 for cell in s.grid[0])
 
 
 def test_insert_chars_applies_current_sgr_bce():
     s = Screen(rows=1, cols=5)
     s.put_char("a")
     s.cursor_position(1, 1)
-    s.sgr([42])  # green background
+    s.sgr([42])  # green background -> normalized index 2
     s.insert_chars(2)
-    assert s.grid[0][0].bg == 42
-    assert s.grid[0][1].bg == 42
+    assert s.grid[0][0].bg == 2
+    assert s.grid[0][1].bg == 2
 
 
 def test_delete_chars_applies_current_sgr_bce():
@@ -396,9 +396,9 @@ def test_delete_chars_applies_current_sgr_bce():
     for ch in "abcde":
         s.put_char(ch)
     s.cursor_position(1, 1)
-    s.sgr([43])  # yellow background
+    s.sgr([43])  # yellow background -> normalized index 3
     s.delete_chars(2)
-    assert s.grid[0][4].bg == 43  # trailing exposed cell after the shift
+    assert s.grid[0][4].bg == 3  # trailing exposed cell after the shift
 
 
 def test_insert_lines_does_not_apply_bce():
@@ -434,5 +434,5 @@ def test_bce_does_not_carry_hyperlink():
     s.set_hyperlink("http://example.com")
     s.sgr([41])
     s.erase_in_line(2)
-    assert s.grid[0][0].bg == 41
+    assert s.grid[0][0].bg == 1  # normalized index for red (41 - 40)
     assert s.grid[0][0].hyperlink is None
