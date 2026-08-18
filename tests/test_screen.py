@@ -436,3 +436,34 @@ def test_bce_does_not_carry_hyperlink():
     s.erase_in_line(2)
     assert s.grid[0][0].bg == 1  # normalized index for red (41 - 40)
     assert s.grid[0][0].hyperlink is None
+
+
+def test_key_encoding_flags_default_zero():
+    s = Screen()
+    assert s.key_encoding_flags == 0
+
+
+def test_key_encoding_flags_set_directly():
+    s = Screen()
+    s.set_key_encoding_flags(0b11, how=1)
+    assert s.key_encoding_flags == 0b11
+
+
+def test_key_encoding_flags_or_in():
+    s = Screen()
+    s.set_key_encoding_flags(0b1, how=1)
+    s.set_key_encoding_flags(0b10, how=2)
+    assert s.key_encoding_flags == 0b11
+
+
+def test_key_encoding_flags_and_not_remove():
+    s = Screen()
+    s.set_key_encoding_flags(0b111, how=1)
+    s.set_key_encoding_flags(0b010, how=3)
+    assert s.key_encoding_flags == 0b101
+
+
+def test_key_encoding_flags_masked_to_7_bits():
+    s = Screen()
+    s.set_key_encoding_flags(0xFF, how=1)
+    assert s.key_encoding_flags == 0x7F

@@ -105,3 +105,30 @@ def test_scroll_zero_offset_does_nothing(state):
     state.screen.set_private_mode(1006, True)
     state.on_scroll(0, 0)
     assert state.session.writes == []
+
+
+def test_kitty_mode_routes_key_through_csi_u(state):
+    state.screen.set_key_encoding_flags(0b1)  # FLAG_DISAMBIGUATE
+    state.on_key(glfw.KEY_UP, 0, glfw.PRESS, 0)
+    assert state.session.writes == [b"\x1b[57352u"]
+
+
+def test_kitty_mode_suppresses_char_callback(state):
+    state.screen.set_key_encoding_flags(0b1)
+    state.on_char(ord("a"))
+    assert state.session.writes == []
+
+
+def test_kitty_mode_sends_release_only_when_flag_set(state):
+    state.screen.set_key_encoding_flags(0b1)  # disambiguate only, no event-types
+    state.on_key(glfw.KEY_UP, 0, glfw.RELEASE, 0)
+    assert state.session.writes == []
+    state.screen.set_key_encoding_flags(0b10, how=2)  # add report-event-types
+    state.on_key(glfw.KEY_UP, 0, glfw.RELEASE, 0)
+    assert state.session.writes == [b"\x1b[57352;1:3u"]
+
+
+def test_legacy_mode_used_when_no_kitty_flags(state):
+    assert state.screen.key_encoding_flags == 0
+    state.on_key(glfw.KEY_UP, 0, glfw.PRESS, 0)
+    assert state.session.writes == [b"\x1b[A"]  # legacy sequence, not CSI u

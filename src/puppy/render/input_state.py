@@ -9,12 +9,24 @@ so tests can substitute a stub instead of a real PtySession).
 GLFW's key/mouse-button callbacks receive an accurate `mods` bitmask on every
 call; cursor-move and scroll callbacks do not, so the most recently seen mods
 value is cached and reused for those.
+
+Kitty keyboard protocol note: once `Screen.key_encoding_flags` is nonzero
+(the running program opted in via `CSI = flags ; mode u`), the GLFW *char*
+callback is deliberately suppressed here -- otherwise a mapped key (a letter,
+say) would be reported twice: once via the key callback's CSI-u sequence and
+again via the char callback's plain UTF-8 text, which real kitty-protocol-
+aware programs don't expect. Real, documented consequence: keys
+`puppy.kitty_keyboard.encode_kitty_key_event` doesn't map yet (most
+punctuation -- see its module docstring) produce *no* input at all while
+enhanced mode is active, not even plain text -- a real v1 gap, not silently
+papered over.
 """
 from __future__ import annotations
 
 import glfw
 
 from ..keyboard import encode_char, encode_key
+from ..kitty_keyboard import encode_kitty_key_event
 from ..mouse import MouseAction, MouseButton, generate_mouse_report
 
 _GLFW_BUTTON_MAP = {
@@ -38,6 +50,11 @@ class InputState:
 
     def on_key(self, key: int, scancode: int, action: int, mods: int) -> None:
         self.current_mods = mods
+        if self.screen.key_encoding_flags:
+            data = encode_kitty_key_event(key, action, mods, self.screen.key_encoding_flags)
+            if data:
+                self.session.write(data)
+            return
         if action == glfw.RELEASE:
             return  # legacy encoding only sends bytes on press/repeat, matching real terminals
         decckm = _DECCKM_MODE in self.screen.private_modes
@@ -46,6 +63,8 @@ class InputState:
             self.session.write(data)
 
     def on_char(self, codepoint: int) -> None:
+        if self.screen.key_encoding_flags:
+            return  # suppressed once kitty protocol is active, see module docstring
         self.session.write(encode_char(codepoint))
 
     def on_mouse_button(self, button: int, action: int, mods: int) -> None:

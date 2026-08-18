@@ -51,6 +51,14 @@ class Parser:
         # without guessing a fixed field count.
         self._is_subparam: list[bool] = [False]
         self._private = False
+        # CSI = flags ; mode u (kitty keyboard protocol progressive enhancement).
+        # A distinct prefix from '?' (DECSET/DECRST) -- confirmed against kitty's
+        # real vt-parser.c: `case 'u': ... if (start_modifier == '=') ... else if
+        # (start_modifier == '?') ...` are different branches. `CSI ? u` (query,
+        # needs writing a response back to the child) and `CSI > u`/`CSI < u`
+        # (push/pop a flags stack) are real, documented gaps -- not implemented,
+        # see puppy.kitty_keyboard's module docstring.
+        self._equals_prefix = False
         self._utf8_bytes = bytearray()
         self._osc_pending_esc = False
         self._osc_buf = bytearray()
@@ -111,6 +119,7 @@ class Parser:
             self._params = [""]
             self._is_subparam = [False]
             self._private = False
+            self._equals_prefix = False
             return
         if ch == "]":
             self.state = self.OSC
@@ -137,6 +146,9 @@ class Parser:
         ch = chr(byte)
         if ch == "?" and self._params == [""]:
             self._private = True
+            return
+        if ch == "=" and self._params == [""]:
+            self._equals_prefix = True
             return
         if ch.isdigit():
             if len(self._params[-1]) < self._MAX_PARAM_LEN:
@@ -174,6 +186,10 @@ class Parser:
     _ALT_SCREEN_MODES = frozenset({47, 1047, 1049})
 
     def _dispatch_csi(self, final: str) -> None:
+        if self._equals_prefix:
+            if final == "u":
+                self.sink.set_key_encoding_flags(self._param(0, 0), self._param(1, 1))
+            return
         if self._private:
             self._dispatch_private_mode(final)
             return

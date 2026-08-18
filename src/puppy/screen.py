@@ -72,6 +72,24 @@ class Screen:
         # OSC 8 hyperlinks: like SGR, an active link attaches to every subsequently
         # written Cell until cleared (OSC 8 with an empty URI).
         self._active_hyperlink: str | None = None
+        # Kitty keyboard protocol progressive-enhancement flags (CSI = flags ; mode
+        # u). Single flat value, not a real push/pop stack and not separated by
+        # main/alt screen -- both are real gaps in kitty's actual model (confirmed
+        # via its screen_push/pop_key_encoding_flags), deliberately not built yet.
+        # See puppy.kitty_keyboard's module docstring for the full protocol scope.
+        self.key_encoding_flags = 0
+
+    def set_key_encoding_flags(self, val: int, how: int = 1) -> None:
+        """how: 1=set directly, 2=OR into current, 3=AND-NOT (remove) from
+        current -- confirmed exact against kitty's real
+        screen_set_key_encoding_flags (screen.c)."""
+        q = val & 0x7F
+        if how == 1:
+            self.key_encoding_flags = q
+        elif how == 2:
+            self.key_encoding_flags |= q
+        elif how == 3:
+            self.key_encoding_flags &= ~q
 
     def set_private_mode(self, mode: int, enabled: bool) -> None:
         if enabled:

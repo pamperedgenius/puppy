@@ -265,3 +265,20 @@ def test_osc_huge_payload_is_truncated_not_unbounded():
     assert screen.dump_text().splitlines()[0] == "ok"
     assert screen.window_title is not None
     assert len(screen.window_title) < 50000
+
+
+def test_csi_equals_u_sets_key_encoding_flags():
+    screen = _run(b"\x1b[=1u")
+    assert screen.key_encoding_flags == 1
+
+
+def test_csi_equals_u_with_mode_param():
+    screen = _run(b"\x1b[=1;1u\x1b[=2;2u")
+    assert screen.key_encoding_flags == 0b11
+
+
+def test_csi_question_u_query_is_ignored_not_crashed():
+    # Real, documented gap: query-response needs writing back to the child,
+    # not built yet -- must not crash or corrupt parser state.
+    screen = _run(b"\x1b[?u" + b"ok")
+    assert screen.dump_text().splitlines()[0] == "ok"

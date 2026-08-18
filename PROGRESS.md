@@ -76,32 +76,48 @@ as a trigger for another verification pass, not just a one-time audit.
 
 ## Current status (2026-08-16)
 
-**puppy is a real, runnable, typeable-into program.** `python -m puppy.render.app` opens
-a live GLFW/wgpu window, spawns a real shell in a real PTY, renders the full grid every
-frame (glyph shaping/rasterization/atlas-packing -> instanced GPU draw, real colors via
-`puppy.render.palette`), and now accepts real keyboard/mouse input: raw GLFW callbacks
-(bypassing `rendercanvas`'s own event abstraction, which silently drops key-repeat
-events — see the Architecture decisions log) feed `puppy.render.input_state.InputState`,
-which encodes legacy key sequences (`puppy.keyboard`) and SGR mouse reports
-(`puppy.mouse`, built earlier) and writes them to the PTY. Verified with two deliberate
-brief live runs (not repeated): the app starts and runs continuously with no crash before
-and after wiring input. 183 tests passing (up from 110 at the very start of the rendering
-push). `source .venv/bin/activate` for any of this — see the Python-environment
-architecture decision entry.
+**puppy is a real, runnable, typeable-into program with kitty keyboard protocol
+support.** `python -m puppy.render.app` opens a live GLFW/wgpu window, spawns a real
+shell in a real PTY, renders the full grid every frame, and accepts real keyboard/mouse
+input — raw GLFW callbacks (bypassing `rendercanvas`'s own event abstraction, which
+silently drops key-repeat events) feed `puppy.render.input_state.InputState`. Once a
+program opts in via `CSI = flags ; mode u` (now parsed — a new `=`-prefix CSI branch,
+confirmed distinct from `?`/DECSET against kitty's real `vt-parser.c`), input switches
+from legacy encoding (`puppy.keyboard`) to real `CSI u` sequences
+(`puppy.kitty_keyboard`, format/modifier-bits/functional-key-codepoints all verified
+exact against kitty's real `key_encoding.c` and `glfw-wrapper.h`). 206 tests passing (up
+from 110 at the very start of the rendering push). `source .venv/bin/activate` for any of
+this — see the Python-environment architecture decision entry.
 
-**Known gaps, all deliberate and documented** (not oversights): no kitty keyboard
-protocol yet (legacy encoding only — `puppy.keyboard`'s docstring); no Alt/Meta-prefixed
-key sequences, no Ctrl+non-letter combos, no Shift+function-key variants; bold/underline
-parse into `Cell` correctly but aren't visually rendered (no bold font variant or
-underline decoration sprite); not launchable from wofi/as a desktop app yet (no
-`.desktop` file — it's a Python module run directly, not an installed application; worth
-doing once the app is further along, not before).
+**Known gaps, all deliberate and documented** (not oversights): kitty keyboard protocol
+has no alternate-key/text-embedding subfields, no hyper/meta modifiers (stock GLFW
+limitation), plain-key codepoints assume US/QWERTY-like layout correspondence, and there's
+no query-response (`CSI ? u`, needs writing bytes back to the child — an architectural
+capability `Parser`/`Screen` don't have yet) or push/pop flags stack (`CSI > u`/`CSI < u`,
+single flat value only); legacy encoding still has no Alt/Meta-prefixed sequences, no
+Ctrl+non-letter combos, no Shift+function-key variants; bold/underline parse into `Cell`
+correctly but aren't visually rendered; not launchable from wofi/as a desktop app yet (no
+`.desktop` file — worth doing once the app is further along, not before).
 
 Full history of everything before today lives in the dated Milestones checklist below —
 not duplicated here, per this file's own "replace, don't append" rule.
 
 ## Architecture decisions log
 
+- **`Parser`/`Screen` have no way to write bytes back to the child PTY — a real
+  architectural gap, not yet needed until now.** Surfaced 2026-08-16 while implementing
+  the kitty keyboard protocol: `CSI ? u` (a program *querying* puppy's current
+  progressive-enhancement flags) requires the terminal to respond by writing
+  `\x1b[?<flags>u` back to the child (confirmed via kitty's real
+  `screen_report_key_encoding_flags`, which calls `write_escape_code_to_child`) —
+  but `Parser.feed()` only ever flows one direction (child output -> `Screen` state),
+  nothing currently lets a `Screen` method trigger output back to the PTY. Deliberately
+  NOT built yet (query support is a documented gap, `CSI ? u` is parsed but a no-op) —
+  the real fix, whenever it's needed, is giving `Screen` (or `Parser`) a write-back
+  channel, likely the same `PtySession` already in `app.py`'s `run()`. Other real
+  terminal features will eventually need this too (DA1/DA2 device-attribute queries,
+  DSR status reports, XTGETTCAP) — worth building the general mechanism once, not
+  once per feature that needs it.
 - **Input bypasses `rendercanvas`'s own event abstraction; raw GLFW callbacks are
   registered directly on the underlying window handle instead.** Checked
   `rendercanvas`'s real installed source (`rendercanvas/glfw.py`) before building input
@@ -377,11 +393,27 @@ with the date when something is confirmed working (not just "code exists").
       wired-up app still starts and runs continuously with no crash. Documented
       v1 gaps: no Alt/Meta-prefixed sequences, no Ctrl+non-letter combos, no
       Shift+function-key variants.
-- [ ] Kitty keyboard protocol (CSI u) — encoding logic can now be built
-      against real GLFW key/scancode/modifier events (`glfw.set_key_callback`
-      gives press/repeat/release natively), following the same
-      "encode_*_event, pure function, unit-tested against known bytes" pattern
-      already used for mouse in `src/puppy/mouse.py`.
+- [x] Kitty keyboard protocol (CSI u) — **core encoding + flag-set done**, real
+      remaining gaps documented below. `src/puppy/kitty_keyboard.py`
+      (`encode_kitty_key_event`): format/modifier-bit-values/action-subfield/
+      functional-key-PUA-codepoints all verified exact against kitty's real
+      `key_encoding.c` + `glfw-wrapper.h`'s `GLFW_FKEY_*` enum, not assumed
+      from the spec doc alone. `Screen.key_encoding_flags` +
+      `set_key_encoding_flags(val, how)` (how=1 set/2 OR/3 AND-NOT, exact
+      against kitty's real `screen_set_key_encoding_flags`), and `Parser` now
+      recognizes `CSI = flags ; mode u` as a distinct prefix from `?`
+      (confirmed distinct branches in kitty's real `vt-parser.c`).
+      `InputState` routes through this encoder once flags are nonzero,
+      suppressing the char callback to avoid double-sending (a real
+      interaction risk caught before it shipped, not after). 2026-08-16, 27
+      new tests (11 kitty_keyboard, 5 Screen, 3 Parser, 4 InputState mode-
+      switching + others already counted). Verified live: still starts and
+      runs with no crash. **Real, documented gaps**: no alternate-key/text-
+      embedding subfields, no hyper/meta modifiers (stock GLFW limitation),
+      plain-key codepoints assume US/QWERTY-like layout, no `CSI ? u` query-
+      response (needs a PTY write-back channel `Parser`/`Screen` don't have
+      yet — see Architecture decisions log) or `CSI > u`/`CSI < u` push/pop
+      stack (single flat flags value only).
 - [ ] Kitty graphics protocol (RGB/RGBA/PNG direct mode first)
 - [ ] Kitty graphics: unicode-placeholder image-in-text method
 - [ ] Sixel graphics (fallback/parity with non-kitty terminals)
@@ -403,6 +435,7 @@ puppy/
     screen.py             Screen, Cell — in-memory grid + cursor + SGR attrs
     mouse.py               SGR mouse-event encoding (puppy.mouse)
     keyboard.py             legacy GLFW-key -> byte-sequence encoding
+    kitty_keyboard.py        CSI u progressive-enhancement key encoding
     render/
       __init__.py          toolkit-choice rationale pointer
       gpu.py                 GpuContext — canvas-agnostic adapter/device/surface + clear()
@@ -423,6 +456,7 @@ puppy/
     test_screen.py
     test_mouse.py
     test_keyboard.py       legacy key-encoding correctness, no GPU/window needed
+    test_kitty_keyboard.py  CSI u encoding correctness, no GPU/window needed
     test_render_font.py   real shaping/rasterization, portable (fc-match, no hardcoded font)
     test_render_atlas.py   pure packing/blit logic, no GPU needed
     test_render_cell_renderer.py  real GPU + real pixel readback, exact-color proofs
@@ -439,20 +473,15 @@ puppy/
 dependencies live there, not in system Python. `pip install -e .` again if the venv
 is ever recreated (it's gitignored).
 
-1. **The kitty keyboard protocol itself (CSI u encoding)** — legacy key encoding is
-   done (`puppy.keyboard`), this is the layer on top: same pattern as `mouse.py`, a
-   pure `encode_*_event` function unit-tested against known byte sequences, verified
-   against kitty's real `keys.c`/`key_encoding.c` before trusting the encoding (same
-   verification discipline used throughout this project). Needs a way for the running
-   program to request it (`CSI = flags ; mode u`, already the kind of thing
-   `Screen`/`Parser` handle for other DEC private-mode-adjacent requests) and a
-   progressive-enhancement flag state to track per screen (main vs alt, per the real
-   spec captured in the original research doc).
-2. Bold/underline visual rendering (currently parsed into `Cell` correctly but not
+1. Bold/underline visual rendering (currently parsed into `Cell` correctly but not
    drawn) — needs either a second "bold" atlas keyed by (glyph_id, bold) pairs (simplest,
    doubles atlas memory for bold-using glyphs) or a synthetic bold (fatten the rasterized
    bitmap, lower fidelity but no second font load) for bold, and an underline decoration
    quad/sprite for underline. Not yet designed in detail.
+2. A general PTY write-back channel for `Screen`/`Parser` (see the new Architecture
+   decisions log entry) — unlocks `CSI ? u` (kitty keyboard protocol query-response)
+   and, later, DA1/DA2 device-attribute queries and DSR status reports, which will all
+   need the same mechanism. Worth building once, generally, not per-feature.
 3. A `.desktop` file + wofi/launcher integration, once the app is further along —
    right now it's a bare Python module (`python -m puppy.render.app`), not an installed
    application, which is why it doesn't show up in wofi. Low effort whenever it's worth
