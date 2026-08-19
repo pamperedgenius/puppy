@@ -19,7 +19,7 @@ BEL = 0x07
 
 
 class Parser:
-    GROUND, ESCAPE, CHARSET, CSI, OSC = range(5)
+    GROUND, ESCAPE, CHARSET, CSI, OSC, APC = range(6)
 
     # Caps on CSI parameter accumulation. A malicious/corrupt byte stream (an
     # untrusted file, a compromised remote program's output) could otherwise send an
@@ -39,6 +39,17 @@ class Parser:
     # quick source search, so this is a deliberately chosen defensive bound, not a
     # matched constant.
     _MAX_OSC_LEN = 8192
+
+    # Kitty graphics protocol (APC, ESC _ ... ESC \) payloads carry real image
+    # data, so this can't be as tight as _MAX_OSC_LEN -- but it still needs a
+    # bound, same DoS class as the CSI-param/OSC caps above. The image-dimension
+    # cap in puppy.graphics (MAX_IMAGE_DIMENSION, matching kitty's real one)
+    # bounds the *accumulated, chunked* total; this bounds a single unchunked
+    # APC unit as it's read off the wire, before that check ever runs. Real
+    # transmissions are chunked at 4096 raw bytes (~5464 base64 chars) per kitty
+    # convention, so this is generously larger than any real single chunk while
+    # still being a deliberately chosen defensive bound, not a matched constant.
+    _MAX_APC_LEN = 6_000_000
 
     def __init__(self, sink) -> None:
         self.sink = sink
@@ -62,6 +73,8 @@ class Parser:
         self._utf8_bytes = bytearray()
         self._osc_pending_esc = False
         self._osc_buf = bytearray()
+        self._apc_pending_esc = False
+        self._apc_buf = bytearray()
 
     def feed(self, data: bytes) -> None:
         for byte in data:
@@ -78,6 +91,8 @@ class Parser:
             self._csi(byte)
         elif self.state == self.OSC:
             self._osc(byte)
+        elif self.state == self.APC:
+            self._apc(byte)
 
     # --- GROUND: plain text + C0 controls ---
 
@@ -125,6 +140,11 @@ class Parser:
             self.state = self.OSC
             self._osc_pending_esc = False
             self._osc_buf = bytearray()
+            return
+        if ch == "_":
+            self.state = self.APC
+            self._apc_pending_esc = False
+            self._apc_buf = bytearray()
             return
         if ch in "()*+":
             self.state = self.CHARSET
@@ -324,3 +344,46 @@ class Parser:
             _params, _, uri = rest.partition(";")
             self.sink.set_hyperlink(uri or None)
         # else: not yet implemented, silently ignored
+
+    # --- APC: kitty graphics protocol (ESC _ ... ESC \, ST-terminated only --
+    # unlike OSC, no BEL-terminator form exists for APC) ---
+
+    def _apc(self, byte: int) -> None:
+        if byte == ESC:
+            self._apc_pending_esc = True
+            return
+        if self._apc_pending_esc:
+            self._apc_pending_esc = False
+            if byte == ord("\\"):
+                self._finish_apc()
+                return
+        if len(self._apc_buf) < self._MAX_APC_LEN:
+            self._apc_buf.append(byte)
+        # else: silently truncated rather than growing unboundedly
+
+    def _finish_apc(self) -> None:
+        self.state = self.GROUND
+        self._dispatch_apc(bytes(self._apc_buf))
+        self._apc_buf = bytearray()
+
+    def _dispatch_apc(self, payload: bytes) -> None:
+        # Kitty graphics protocol command: 'G' followed by comma-separated
+        # key=value control data, then ';', then the base64 image payload.
+        # Confirmed against kitty's real apc_parsers.py-generated parser (the
+        # 'G' marker distinguishes graphics APC from any other APC use).
+        if not payload or payload[0:1] != b"G":
+            return
+        body = payload[1:]
+        control_bytes, _, apc_payload = body.partition(b";")
+        try:
+            control_str = control_bytes.decode("ascii")
+        except UnicodeDecodeError:
+            return
+        control: dict[str, str] = {}
+        for pair in control_str.split(","):
+            if not pair:
+                continue
+            key, sep, value = pair.partition("=")
+            if sep and key:
+                control[key] = value
+        self.sink.graphics_command(control, apc_payload)

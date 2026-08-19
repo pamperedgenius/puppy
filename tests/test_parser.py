@@ -267,6 +267,28 @@ def test_osc_huge_payload_is_truncated_not_unbounded():
     assert len(screen.window_title) < 50000
 
 
+def test_apc_graphics_command_terminated_by_st_reaches_screen():
+    import base64
+
+    pixels = base64.b64encode(bytes(range(12)))  # 2x2 RGB
+    screen = _run(b"\x1b_Ga=T,f=24,s=2,v=2,i=42;" + pixels + b"\x1b\\ok")
+    assert screen.graphics.images[42].data == bytes(range(12))
+    assert len(screen.graphics.placements) == 1
+    assert screen.dump_text().splitlines()[0] == "ok"
+
+
+def test_apc_non_graphics_payload_is_ignored_not_crashed():
+    screen = _run(b"\x1b_not a graphics command\x1b\\ok")
+    assert screen.graphics.images == {}
+    assert screen.dump_text().splitlines()[0] == "ok"
+
+
+def test_apc_huge_payload_is_truncated_not_unbounded():
+    huge = b"a" * 7_000_000
+    screen = _run(b"\x1b_G" + huge + b"\x1b\\ok")
+    assert screen.dump_text().splitlines()[0] == "ok"
+
+
 def test_csi_equals_u_sets_key_encoding_flags():
     screen = _run(b"\x1b[=1u")
     assert screen.key_encoding_flags == 1

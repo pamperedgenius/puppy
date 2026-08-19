@@ -15,6 +15,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable
 
+from puppy.graphics import GraphicsManager
+
 
 @dataclass
 class Cell:
@@ -95,6 +97,13 @@ class Screen:
         # via its screen_push/pop_key_encoding_flags), deliberately not built yet.
         # See puppy.kitty_keyboard's module docstring for the full protocol scope.
         self.key_encoding_flags = 0
+        # Kitty graphics protocol (model layer only -- see puppy.graphics for
+        # scope). Screen.graphics_command is Parser's entry point (APC 'G'
+        # commands); GraphicsManager owns the actual image/placement state.
+        self.graphics = GraphicsManager()
+
+    def graphics_command(self, control: dict[str, str], payload: bytes) -> None:
+        self.graphics.handle_command(control, payload, self.cursor_row, self.cursor_col)
 
     def set_key_encoding_flags(self, val: int, how: int = 1) -> None:
         """how: 1=set directly, 2=OR into current, 3=AND-NOT (remove) from

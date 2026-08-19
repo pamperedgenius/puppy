@@ -74,28 +74,34 @@ found because writing an honest terminfo entry (which has a `bce` capability fla
 forced the question "do we actually do this?" Worth treating protocol/terminfo work
 as a trigger for another verification pass, not just a one-time audit.
 
-## Current status (2026-08-16)
+## Current status (2026-08-19)
 
 **puppy is a real, runnable, typeable-into program with kitty keyboard protocol support
-(including query-response), real bold/underline rendering, and a general PTY write-back
-channel.** `python -m puppy.render.app` opens a live GLFW/wgpu window, spawns a real
-shell in a real PTY, renders the full grid every frame (bold via FreeType's real
-synthetic emboldening, underline at real font metrics, both proven with exact-pixel GPU
+(including query-response), real bold/underline rendering, a general PTY write-back
+channel, and a kitty graphics protocol model layer (not yet rendered).**
+`python -m puppy.render.app` opens a live GLFW/wgpu window, spawns a real shell in a
+real PTY, renders the full grid every frame (bold via FreeType's real synthetic
+emboldening, underline at real font metrics, both proven with exact-pixel GPU
 readback), and accepts real keyboard/mouse input, including the full kitty keyboard
 protocol round-trip: `CSI = flags ; mode u` sets progressive-enhancement flags, `CSI ?
 u` now gets a real response (`Screen.write_back`, a constructor-injected callable
 defaulting to a no-op so every existing `Screen()`-with-no-PTY test/use keeps working
-unchanged — `puppy.render.app` and `__main__.py` both wire it to `session.write`). 218
-tests passing (up from 110 at the very start of the rendering push). `source
-.venv/bin/activate` for any of this — see the Python-environment architecture decision
-entry.
+unchanged — `puppy.render.app` and `__main__.py` both wire it to `session.write`).
+`Parser` now also has a fifth state (APC, `ESC _ ... ESC \`) feeding
+`src/puppy/graphics.py`'s `GraphicsManager` (`a=T`/`a=t` transmit, direct RGB/RGBA
+only, chunked reassembly included) via `Screen.graphics_command` — images land in
+`Screen.graphics.images`/`.placements` but nothing draws them yet. 235 tests passing
+(up from 110 at the very start of the rendering push). `source .venv/bin/activate`
+for any of this — see the Python-environment architecture decision entry.
 
 **Known gaps, all deliberate and documented** (not oversights): kitty keyboard protocol
 has no alternate-key/text-embedding subfields, no hyper/meta modifiers, no push/pop
 flags stack (single flat value); legacy encoding has no Alt/Meta-prefixed sequences, no
 Ctrl+non-letter combos, no Shift+function-key variants; no strikethrough or kitty's
-HSLuv-based automatic contrast override; not launchable from wofi/as a desktop app yet
-(no `.desktop` file — worth doing once the app is further along, not before).
+HSLuv-based automatic contrast override; kitty graphics has no PNG/compression/delete/
+query/animation/unicode-placeholder/file-transmission support, and no GPU rendering of
+placed images at all yet; not launchable from wofi/as a desktop app yet (no `.desktop`
+file — worth doing once the app is further along, not before).
 
 Full history of everything before today lives in the dated Milestones checklist below —
 not duplicated here, per this file's own "replace, don't append" rule.
@@ -456,7 +462,42 @@ with the date when something is confirmed working (not just "code exists").
       starts and runs with no crash. **Real, documented gaps**: no
       strikethrough, no kitty's HSLuv-based automatic fg/bg contrast
       override, no cursor/selection compositing.
-- [ ] Kitty graphics protocol (RGB/RGBA/PNG direct mode first)
+- [x] Kitty graphics protocol v1 model layer (direct RGB/RGBA transmit+display,
+      chunked reassembly) — `Parser` gained a 5th state, APC (`ESC _ ... ESC \`,
+      ST-terminated only, no BEL form — mirrors the OSC buffering pattern with its
+      own length cap, `_MAX_APC_LEN`); `_dispatch_apc` recognizes the `G` marker,
+      splits comma-separated `key=value` control data from the base64 payload at
+      the first `;`, and calls `sink.graphics_command(control, payload)`.
+      `src/puppy/graphics.py` (`GraphicsManager`, `Image`, `Placement`,
+      `_PendingLoad`): confirmed against kitty's real `graphics.c`
+      (`grman_handle_command`'s action-dispatch switch, `handle_add_command`,
+      `load_image_data`, the `INIT_CHUNKED_LOAD` macro) that action absent behaves
+      like `a=t` (transmit-only, no placement — grouped with `case 0`/`case 't'`
+      in kitty's real switch, distinct from `case 'T'`), and that a continuation
+      chunk (`m=1` on all but the last) carries only `m` and payload — the
+      in-progress load, not the image id, is what a continuation targets, so
+      repeated/wrong control keys on a continuation are correctly ignored (real
+      finding, tested: `test_chunked_transmission_continuation_ignores_repeated_control_keys`).
+      Sizing/DoS handling matches kitty's own real behavior for this exact case:
+      direct RGB/RGBA has an *exact* expected size from declared `width*height*bpp`
+      (`MAX_IMAGE_DIMENSION` bounds the declared dimensions themselves, confirmed
+      against kitty's real constant), so both an overlong chunk and a short/
+      incomplete transmission are rejected rather than silently accepted, and the
+      loading slot is always cleared afterward so a rejected/short load can't wedge
+      a later well-formed command into being treated as its continuation. v1 scope
+      deliberately excludes (each a real separate follow-up, not attempted here):
+      `f=100` (PNG), compression (`o=z`), `a=p` (put/display-only on an existing
+      image), `a=d` (delete), `a=q` (query), `a=a`/`a=f` (animation), `a=c`
+      (compose), unicode-placeholder, file/shm transmission (`t=f`/`t=t`/`t=s`).
+      2026-08-19, 17 new tests (14 `test_graphics.py` model-layer, 3
+      `test_parser.py` end-to-end through real APC escape bytes including a
+      truncation-cap test). **GPU rendering of placed images is a separate, later
+      pass** — a real texture + draw path, distinct from the glyph atlas, same as
+      always planned; images currently just accumulate in
+      `Screen.graphics.images`/`.placements` with nothing consuming them yet.
+- [ ] Kitty graphics: PNG format (`f=100`), compression (`o=z`)
+- [ ] Kitty graphics: GPU rendering of placed images (texture + draw path)
+- [ ] Kitty graphics: `a=p`/`a=d`/`a=q` (put/delete/query), animation (`a=a`/`a=f`)
 - [ ] Kitty graphics: unicode-placeholder image-in-text method
 - [ ] Sixel graphics (fallback/parity with non-kitty terminals)
 - [ ] Remaining kitty misc extensions (text-sizing, DnD, multi-cursor, file-transfer,
@@ -478,6 +519,7 @@ puppy/
     mouse.py               SGR mouse-event encoding (puppy.mouse)
     keyboard.py             legacy GLFW-key -> byte-sequence encoding
     kitty_keyboard.py        CSI u progressive-enhancement key encoding
+    graphics.py               GraphicsManager — kitty graphics protocol model layer (no rendering)
     render/
       __init__.py          toolkit-choice rationale pointer
       gpu.py                 GpuContext — canvas-agnostic adapter/device/surface + clear()
@@ -499,6 +541,7 @@ puppy/
     test_mouse.py
     test_keyboard.py       legacy key-encoding correctness, no GPU/window needed
     test_kitty_keyboard.py  CSI u encoding correctness, no GPU/window needed
+    test_graphics.py        GraphicsManager model-layer correctness, no GPU/window needed
     test_render_font.py   real shaping/rasterization, portable (fc-match, no hardcoded font)
     test_render_atlas.py   pure packing/blit logic, no GPU needed
     test_render_cell_renderer.py  real GPU + real pixel readback, exact-color proofs
@@ -515,68 +558,21 @@ puppy/
 dependencies live there, not in system Python. `pip install -e .` again if the venv
 is ever recreated (it's gitignored).
 
-1. **The kitty graphics protocol — IN PROGRESS, mid-verification-pass when this was
-   last updated (2026-08-16). Read this whole item before writing any code.**
-   Everything else in the Milestones list above this is done. This is a genuinely
-   bigger lift than recent milestones (kitty's real `graphics.c` is 2803 lines) — the
-   plan below deliberately splits it into a small, fully-testable model-layer pass
-   first, with GPU compositing as a **separate, later** pass. Don't attempt both at
-   once.
-
-   **What's already confirmed from kitty's real source this session** (from
-   `~/Projects/kitty/kitty/parse-graphics-command.h`, which is generated from
-   `apc_parsers.py` — a real, authoritative key-value parser for the control-data
-   string): the control-data key characters are `a`=action, `d`=delete_action,
-   `t`=transmission_type, `o`=compressed, `f`=format, `m`=more (chunking),
-   `i`=id, `I`=image_number, `p`=placement_id, `q`=quiet, `w`/`h`=width/height,
-   `x`/`y`=x_offset/y_offset, `v`/`s`=data_height/data_width, `S`=data_sz,
-   `O`=data_offset, `c`/`r`=num_cells/num_lines, `X`/`Y`=cell_x_offset/
-   cell_y_offset, `z`=z_index, `C`=cursor_movement, `U`=unicode_placement,
-   `P`/`Q`=parent_id/parent_placement_id, `N`=usage_hints, `H`/`V`=offset_from_
-   parent_x/y. This matches the research doc's summary — confirmed, not
-   contradicted, but the *exact dispatch/chunking logic* (how `m=1`/`m=0` chunks
-   get reassembled, what `handle_graphics_command` actually does with a fully
-   parsed command) was **not yet re-checked** — a `grep` for
-   `handle_graphics_command|is_multiframe|more_chunks` in `graphics.c` came back
-   empty right as this got interrupted, so the right function names weren't found
-   yet. Next session: search `graphics.c` differently (try `grep -n "^screen_"
-   graphics.c` or `grep -n "\.more\b" graphics.c` for the chunking-accumulation
-   code, and `grep -n "^grman_" graphics.c` for the image-storage-manager
-   functions, since kitty's own graphics state lives in a `GraphicsManager`
-   struct — `grman_*` — matching the naming this plan already independently
-   converged on below) before trusting the chunking model sketched here.
-
-   **Planned v1 architecture** (model layer only, no rendering yet):
-   - `Parser`: a new APC state (`ESC _ ... ESC \`, distinct from OSC's `ESC ]`
-     handling it can otherwise structurally mirror — buffer-until-`ST`, same
-     `_MAX_OSC_LEN`-style length cap **but sized for images**, not 8KB — either a
-     much larger single-chunk cap (protocol convention chunks payloads at 4096
-     bytes each) or cap total accumulated bytes across chunks at something like
-     64MB, whichever kitty's real behavior turns out to do once the chunking
-     logic above is actually re-checked. This is a real DoS surface (same class
-     as the CSI-param and OSC-buffer fixes earlier) — don't skip capping it just
-     because images are legitimately large.
-   - Parse the control-data string (comma-separated `key=value` pairs) into a
-     dict, split from the base64 payload by finding the first `;`.
-   - `src/puppy/graphics.py`: a `GraphicsManager`-ish model (mirroring kitty's
-     `grman_*` naming once confirmed) holding `images: dict[id, Image]` (decoded
-     RGB/RGBA pixel bytes + width/height) and `placements: list[Placement]`
-     (image_id, cell_row, cell_col, cell span, z_index). `Screen.graphics =
-     GraphicsManager()`, plus a `Screen.graphics_command(control_data, payload)`
-     entry point Parser calls.
-   - **v1 scope, deliberately**: `a=T` (transmit+display) only, `f=24`/`f=32`
-     (direct RGB/RGBA) only — no `f=100` (PNG) yet, no compression (`o=z`), no
-     `a=d` (delete), no `a=q` (query), no animation, no unicode-placeholder,
-     no file/tempfile/shm transmission modes (`t=f`/`t=t`/`t=s`, only `t=d`
-     direct). Each of these is a real, separate follow-up milestone, not
-     something to half-build now.
-   - Test with real, hand-built base64-encoded RGB/RGBA payloads (small, e.g.
-     2x2 pixels) through the actual `Parser`, asserting `Screen.graphics.images`
-     ends up with the exact decoded pixel bytes — same "real data through the
-     real pipeline" discipline as every other protocol layer.
-   - GPU rendering of placed images is explicitly **not** part of this pass —
-     separate texture + draw path, distinct from the glyph atlas, comes after
-     the model layer is solid and tested.
+1. **Kitty graphics protocol GPU rendering — the model layer (previous item) is
+   done, this is the next piece.** `Screen.graphics.images`/`.placements` are
+   populated correctly (17 tests) but nothing draws them yet. Needs: a real
+   texture upload path (distinct from `GlyphAtlas`, which is sized for
+   fixed-cell-sized glyph slots, not arbitrary-sized images) and a separate draw
+   call/pipeline in `cell_renderer.py` or a sibling module, positioned by each
+   `Placement`'s `row`/`col` against real cell pixel geometry (same
+   `cell.width`/`cell.height` values `CellRenderer`'s uniforms already carry).
+   Check kitty's real `send_image_to_gpu`/`upload_to_gpu` (`graphics.c`) and its
+   image-compositing shader path before assuming a design — same discipline as
+   every rendering milestone so far (cell_renderer's alpha-blend formula, the
+   bold/underline pass) rather than guessing from the spec alone. Start with a
+   single non-chunked RGB image displayed at a fixed position as the minimal
+   proof, mirroring how the cell-grid renderer itself was first proven with a
+   flat clear-color pass before real glyphs.
 2. A `.desktop` file + wofi/launcher integration, once the app is further along —
    right now it's a bare Python module (`python -m puppy.render.app`), not an installed
    application, which is why it doesn't show up in wofi. Low effort whenever it's worth
