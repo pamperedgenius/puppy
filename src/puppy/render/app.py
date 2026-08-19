@@ -28,6 +28,7 @@ from .atlas import GlyphAtlas
 from .cell_renderer import INSTANCE_DTYPE, CellRenderer
 from .color import srgb_color
 from .font import FontRenderer
+from .graphics_renderer import GraphicsRenderer
 from .input_state import InputState
 from .palette import resolve_color
 from .window import Window
@@ -74,6 +75,7 @@ def run(rows: int = 24, cols: int = 80, pixel_size: int = 16) -> None:
     renderer = CellRenderer(
         window.gpu, atlas, rows, cols, underline_y=font.underline_y, underline_thickness=font.underline_thickness
     )
+    graphics_renderer = GraphicsRenderer(window.gpu)
 
     session = PtySession(rows=rows, cols=cols)
     screen = Screen(rows, cols, write_back=session.write)
@@ -88,6 +90,7 @@ def run(rows: int = 24, cols: int = 80, pixel_size: int = 16) -> None:
 
     def draw_frame() -> None:
         renderer.render(build_instances(screen, font, atlas))
+        graphics_renderer.render(screen.graphics, cols=cols, rows=rows, cell_width=font.cell_width, cell_height=font.cell_height)
 
     try:
         while not window.should_close():
