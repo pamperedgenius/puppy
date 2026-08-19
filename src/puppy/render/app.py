@@ -6,12 +6,12 @@ validate the PTY/parser/screen layers without a GPU/display.
 
 v1 scope: full-grid redraw every frame (no dirty-cell tracking), colors
 resolved via puppy.render.palette (ansi256 + Screen.palette OSC-4 overrides),
-reverse video handled by swapping fg/bg, bold/underline attributes not yet
-visually rendered (no bold font variant or underline decoration sprite built
-yet -- deliberate, documented gap, matching the same scoping as the rest of
-this render pass). Key/mouse input is wired via puppy.render.input_state's
-InputState -- legacy (non-kitty-protocol) key encoding for now, see
-puppy.keyboard's module docstring for that scope limit.
+reverse video handled by swapping fg/bg. Bold uses FreeType's real synthetic
+emboldening (see font.py), underline is drawn at the font's real
+underline_y/thickness metrics (see cell_renderer.py) -- neither is a
+placeholder. Key/mouse input is wired via puppy.render.input_state's
+InputState, including the kitty keyboard protocol once a program opts in
+(see puppy.kitty_keyboard's module docstring for its scope limits).
 """
 from __future__ import annotations
 
@@ -52,15 +52,16 @@ def build_instances(screen: Screen, font: FontRenderer, atlas: GlyphAtlas) -> np
     for row_idx, row in enumerate(screen.grid):
         for col_idx, cell in enumerate(row):
             glyph_id = font.glyph_id_for_char(cell.char)
-            bitmap = font.rasterize(glyph_id)
-            slot = atlas.get_or_add(glyph_id, bitmap)
+            bitmap = font.rasterize(glyph_id, bold=cell.bold)
+            slot = atlas.get_or_add((glyph_id, cell.bold), bitmap)
 
             fg_rgb = resolve_color(cell.fg, DEFAULT_FG, screen.palette)
             bg_rgb = resolve_color(cell.bg, DEFAULT_BG, screen.palette)
             if cell.reverse:
                 fg_rgb, bg_rgb = bg_rgb, fg_rgb
 
-            instances[idx] = (col_idx, row_idx, slot.col, slot.row, srgb_color(*fg_rgb), srgb_color(*bg_rgb))
+            flags = (1.0 if cell.underline else 0.0, 0.0, 0.0, 0.0)
+            instances[idx] = (col_idx, row_idx, slot.col, slot.row, srgb_color(*fg_rgb), srgb_color(*bg_rgb), flags)
             idx += 1
     return instances
 
@@ -70,7 +71,9 @@ def run(rows: int = 24, cols: int = 80, pixel_size: int = 16) -> None:
     font = FontRenderer(font_path, pixel_size)
     atlas = GlyphAtlas(font.cell_width, font.cell_height, font.ascender)
     window = Window(rows, cols, font.cell_width, font.cell_height, title="puppy")
-    renderer = CellRenderer(window.gpu, atlas, rows, cols)
+    renderer = CellRenderer(
+        window.gpu, atlas, rows, cols, underline_y=font.underline_y, underline_thickness=font.underline_thickness
+    )
 
     screen = Screen(rows, cols)
     parser = Parser(screen)

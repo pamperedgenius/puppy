@@ -100,3 +100,25 @@ def test_pixel_buffer_length_matches_width_times_height(font):
     for ch in "MiW. #@":
         bitmap = font.rasterize_char(ch)
         assert len(bitmap.pixels) == bitmap.width * bitmap.height
+
+
+def test_bold_produces_more_ink_than_regular(font):
+    regular = font.rasterize_char("M", bold=False)
+    bold = font.rasterize_char("M", bold=True)
+    assert sum(bold.pixels) > sum(regular.pixels)
+
+
+def test_bold_and_regular_are_cached_separately(font):
+    regular = font.rasterize_char("M", bold=False)
+    bold = font.rasterize_char("M", bold=True)
+    assert regular is not bold
+    # calling again returns the same cached objects, not fresh re-renders
+    assert font.rasterize_char("M", bold=False) is regular
+    assert font.rasterize_char("M", bold=True) is bold
+
+
+def test_underline_metrics_are_sane(font):
+    assert isinstance(font.underline_thickness, int) and font.underline_thickness >= 1
+    # underline sits below the baseline, above the very bottom of the cell,
+    # and within the cell bounds
+    assert font.ascender < font.underline_y < font.cell_height

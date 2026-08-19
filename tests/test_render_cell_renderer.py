@@ -64,7 +64,7 @@ def test_partially_inked_glyph_produces_exact_fg_and_bg_pixels():
     renderer = CellRenderer(gpu, atlas, rows=1, cols=1)
 
     instances = np.zeros(1, dtype=INSTANCE_DTYPE)
-    instances[0] = (0, 0, slot.col, slot.row, srgb_color(255, 0, 0), srgb_color(0, 0, 255))
+    instances[0] = (0, 0, slot.col, slot.row, srgb_color(255, 0, 0), srgb_color(0, 0, 255), (0, 0, 0, 0))
     canvas.request_draw(lambda: renderer.render(instances))
     img = canvas.draw()
 
@@ -84,7 +84,7 @@ def test_real_rasterized_glyph_renders_something_not_just_flat_bg():
     renderer = CellRenderer(gpu, atlas, rows=1, cols=1)
 
     instances = np.zeros(1, dtype=INSTANCE_DTYPE)
-    instances[0] = (0, 0, slot.col, slot.row, srgb_color(255, 255, 255), srgb_color(0, 0, 0))
+    instances[0] = (0, 0, slot.col, slot.row, srgb_color(255, 255, 255), srgb_color(0, 0, 0), (0, 0, 0, 0))
     canvas.request_draw(lambda: renderer.render(instances))
     img = canvas.draw()
 
@@ -106,10 +106,48 @@ def test_two_cells_render_independently():
     renderer = CellRenderer(gpu, atlas, rows=1, cols=2)
 
     instances = np.zeros(2, dtype=INSTANCE_DTYPE)
-    instances[0] = (0, 0, slot.col, slot.row, srgb_color(255, 0, 0), srgb_color(0, 0, 0))
-    instances[1] = (1, 0, slot.col, slot.row, srgb_color(0, 255, 0), srgb_color(0, 0, 0))
+    instances[0] = (0, 0, slot.col, slot.row, srgb_color(255, 0, 0), srgb_color(0, 0, 0), (0, 0, 0, 0))
+    instances[1] = (1, 0, slot.col, slot.row, srgb_color(0, 255, 0), srgb_color(0, 0, 0), (0, 0, 0, 0))
     canvas.request_draw(lambda: renderer.render(instances))
     img = canvas.draw()
 
     assert list(img[2, 1]) == [255, 0, 0, 255]  # left cell: red
     assert list(img[2, 5]) == [0, 255, 0, 255]  # right cell: green
+
+
+def test_underline_draws_fg_colored_band_at_real_metrics_position():
+    cell_w, cell_h = 8, 8
+    atlas = GlyphAtlas(cell_width=cell_w, cell_height=cell_h, ascender=cell_h)
+    no_ink = GlyphBitmap(width=0, height=0, bearing_x=0, bearing_y=0, pixels=b"")
+    slot = atlas.get_or_add(1, no_ink)
+
+    canvas = offscreen.RenderCanvas(size=(cell_w, cell_h))
+    gpu = GpuContext.create(canvas)
+    # underline_y=6, thickness=2 -> band covers pixel rows with center in [5, 7]
+    renderer = CellRenderer(gpu, atlas, rows=1, cols=1, underline_y=6, underline_thickness=2)
+
+    instances = np.zeros(1, dtype=INSTANCE_DTYPE)
+    instances[0] = (0, 0, slot.col, slot.row, srgb_color(255, 0, 0), srgb_color(0, 0, 0), (1.0, 0, 0, 0))
+    canvas.request_draw(lambda: renderer.render(instances))
+    img = canvas.draw()
+
+    assert list(img[0, 3]) == [0, 0, 0, 255]  # top of cell: plain bg, no underline
+    assert list(img[6, 3]) == [255, 0, 0, 255]  # underline row: fg color
+
+
+def test_underline_flag_off_never_draws_a_band():
+    cell_w, cell_h = 8, 8
+    atlas = GlyphAtlas(cell_width=cell_w, cell_height=cell_h, ascender=cell_h)
+    no_ink = GlyphBitmap(width=0, height=0, bearing_x=0, bearing_y=0, pixels=b"")
+    slot = atlas.get_or_add(1, no_ink)
+
+    canvas = offscreen.RenderCanvas(size=(cell_w, cell_h))
+    gpu = GpuContext.create(canvas)
+    renderer = CellRenderer(gpu, atlas, rows=1, cols=1, underline_y=6, underline_thickness=2)
+
+    instances = np.zeros(1, dtype=INSTANCE_DTYPE)
+    instances[0] = (0, 0, slot.col, slot.row, srgb_color(255, 0, 0), srgb_color(0, 0, 0), (0.0, 0, 0, 0))
+    canvas.request_draw(lambda: renderer.render(instances))
+    img = canvas.draw()
+
+    assert list(img[6, 3]) == [0, 0, 0, 255]  # same row that would be underlined -- plain bg instead

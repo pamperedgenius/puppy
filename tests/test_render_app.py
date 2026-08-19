@@ -105,3 +105,24 @@ def test_build_instances_reuses_atlas_slots_for_repeated_chars(font, atlas):
     instances = build_instances(screen, font, atlas)
     slots = {(inst["atlas_col"], inst["atlas_row"]) for inst in instances}
     assert len(slots) == 1  # same glyph -> same atlas slot, not re-packed
+
+
+def test_build_instances_bold_cell_gets_a_different_atlas_slot(font, atlas):
+    screen = Screen(rows=1, cols=2)
+    screen.put_char("a")
+    screen.sgr([1])  # bold
+    screen.put_char("a")
+    instances = build_instances(screen, font, atlas)
+    regular_slot = (instances[0]["atlas_col"], instances[0]["atlas_row"])
+    bold_slot = (instances[1]["atlas_col"], instances[1]["atlas_row"])
+    assert regular_slot != bold_slot
+
+
+def test_build_instances_underline_sets_flag(font, atlas):
+    screen = Screen(rows=1, cols=2)
+    screen.put_char("a")
+    screen.sgr([4])  # underline
+    screen.put_char("a")
+    instances = build_instances(screen, font, atlas)
+    assert instances[0]["flags"][0] == 0.0
+    assert instances[1]["flags"][0] == 1.0

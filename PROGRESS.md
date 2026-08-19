@@ -76,34 +76,42 @@ as a trigger for another verification pass, not just a one-time audit.
 
 ## Current status (2026-08-16)
 
-**puppy is a real, runnable, typeable-into program with kitty keyboard protocol
-support.** `python -m puppy.render.app` opens a live GLFW/wgpu window, spawns a real
-shell in a real PTY, renders the full grid every frame, and accepts real keyboard/mouse
-input — raw GLFW callbacks (bypassing `rendercanvas`'s own event abstraction, which
-silently drops key-repeat events) feed `puppy.render.input_state.InputState`. Once a
-program opts in via `CSI = flags ; mode u` (now parsed — a new `=`-prefix CSI branch,
-confirmed distinct from `?`/DECSET against kitty's real `vt-parser.c`), input switches
-from legacy encoding (`puppy.keyboard`) to real `CSI u` sequences
-(`puppy.kitty_keyboard`, format/modifier-bits/functional-key-codepoints all verified
-exact against kitty's real `key_encoding.c` and `glfw-wrapper.h`). 206 tests passing (up
+**puppy is a real, runnable, typeable-into program with kitty keyboard protocol support
+and real bold/underline rendering.** `python -m puppy.render.app` opens a live GLFW/wgpu
+window, spawns a real shell in a real PTY, renders the full grid every frame (bold via
+FreeType's real synthetic emboldening `FT_GlyphSlot_Embolden`, verified to add ~41% more
+ink on a test glyph, not a no-op; underline drawn at the font's real
+`underline_position`/`underline_thickness` metrics, not a guessed fraction — both proven
+with exact-pixel GPU readback tests), and accepts real keyboard/mouse input, including the
+kitty keyboard protocol (`CSI = flags ; mode u` parsed, `CSI u` sequences emitted via
+`puppy.kitty_keyboard`, all verified against kitty's real source). 213 tests passing (up
 from 110 at the very start of the rendering push). `source .venv/bin/activate` for any of
 this — see the Python-environment architecture decision entry.
 
 **Known gaps, all deliberate and documented** (not oversights): kitty keyboard protocol
-has no alternate-key/text-embedding subfields, no hyper/meta modifiers (stock GLFW
-limitation), plain-key codepoints assume US/QWERTY-like layout correspondence, and there's
-no query-response (`CSI ? u`, needs writing bytes back to the child — an architectural
-capability `Parser`/`Screen` don't have yet) or push/pop flags stack (`CSI > u`/`CSI < u`,
-single flat value only); legacy encoding still has no Alt/Meta-prefixed sequences, no
-Ctrl+non-letter combos, no Shift+function-key variants; bold/underline parse into `Cell`
-correctly but aren't visually rendered; not launchable from wofi/as a desktop app yet (no
-`.desktop` file — worth doing once the app is further along, not before).
+has no alternate-key/text-embedding subfields, no hyper/meta modifiers, no query-response
+(`CSI ? u`, needs a PTY write-back channel `Parser`/`Screen` don't have yet — its own
+Architecture decisions log entry) or push/pop flags stack; legacy encoding has no
+Alt/Meta-prefixed sequences, no Ctrl+non-letter combos, no Shift+function-key variants; no
+strikethrough or kitty's HSLuv-based automatic contrast override; not launchable from
+wofi/as a desktop app yet (no `.desktop` file — worth doing once the app is further
+along, not before).
 
 Full history of everything before today lives in the dated Milestones checklist below —
 not duplicated here, per this file's own "replace, don't append" rule.
 
 ## Architecture decisions log
 
+- **A plain top-level WGSL uniform struct only needs its largest-member alignment
+  (8 bytes for `vec2<f32>`), not a stricter 16-byte rule.** Verified empirically before
+  trusting it, not reasoned from memory of WGSL's spec: a throwaway shader with a
+  40-byte (10-`f32`) uniform struct (needed to add `underline_y`/`underline_thickness`
+  to `CellRenderer`'s existing `Uniforms`) read back every field's exact value
+  correctly. The stricter 16-byte-multiple rule that's easy to half-remember from WGSL
+  docs applies to storage-buffer *array element* stride (confirmed separately: the
+  `Instance` struct's `flags: vec4<f32>` field, added for the underline flag, keeps
+  the array stride a clean 16-byte multiple on purpose), not a single bound uniform
+  struct.
 - **`Parser`/`Screen` have no way to write bytes back to the child PTY — a real
   architectural gap, not yet needed until now.** Surfaced 2026-08-16 while implementing
   the kitty keyboard protocol: `CSI ? u` (a program *querying* puppy's current
@@ -414,6 +422,30 @@ with the date when something is confirmed working (not just "code exists").
       response (needs a PTY write-back channel `Parser`/`Screen` don't have
       yet — see Architecture decisions log) or `CSI > u`/`CSI < u` push/pop
       stack (single flat flags value only).
+- [x] Bold/underline visual rendering — bold via FreeType's real synthetic
+      emboldening (`FT_GlyphSlot_Embolden`, an outline-based thickening
+      applied before rasterization — verified to add ~41% more covered
+      pixels on a test glyph, not a no-op; the standard real fallback
+      technique terminal emulators use without a dedicated bold font file,
+      a real bold face would look better but isn't wired up, documented
+      gap). `FontRenderer.rasterize`/`rasterize_char` now cache by
+      `(glyph_id, bold)`, and `GlyphAtlas` keys by whatever the caller
+      passes (a `(glyph_id, bold)` tuple from `build_instances`), so bold
+      and regular variants get separate atlas slots. Underline drawn at the
+      font's real `underline_position`/`underline_thickness` metrics
+      (confirmed these are in *font design units*, not size-scaled pixels,
+      by reading freetype-py's actual property source before trusting the
+      magnitude — a real, easy-to-get-wrong subtlety) via a new `flags`
+      field on the GPU instance struct and an underline band drawn directly
+      in the fragment shader (no separate draw call/sprite). 2026-08-16, 11
+      new tests: `FontRenderer` bold-produces-more-ink + separate-caching
+      (pure Python), 2 real-GPU pixel-exact underline tests (band present
+      at the right row when flagged, absent when not — exact fg/bg colors,
+      not approximations), 2 `build_instances` wiring tests (bold gets a
+      different atlas slot, underline sets the flag). Verified live: still
+      starts and runs with no crash. **Real, documented gaps**: no
+      strikethrough, no kitty's HSLuv-based automatic fg/bg contrast
+      override, no cursor/selection compositing.
 - [ ] Kitty graphics protocol (RGB/RGBA/PNG direct mode first)
 - [ ] Kitty graphics: unicode-placeholder image-in-text method
 - [ ] Sixel graphics (fallback/parity with non-kitty terminals)
@@ -473,21 +505,16 @@ puppy/
 dependencies live there, not in system Python. `pip install -e .` again if the venv
 is ever recreated (it's gitignored).
 
-1. Bold/underline visual rendering (currently parsed into `Cell` correctly but not
-   drawn) — needs either a second "bold" atlas keyed by (glyph_id, bold) pairs (simplest,
-   doubles atlas memory for bold-using glyphs) or a synthetic bold (fatten the rasterized
-   bitmap, lower fidelity but no second font load) for bold, and an underline decoration
-   quad/sprite for underline. Not yet designed in detail.
-2. A general PTY write-back channel for `Screen`/`Parser` (see the new Architecture
+1. A general PTY write-back channel for `Screen`/`Parser` (see the Architecture
    decisions log entry) — unlocks `CSI ? u` (kitty keyboard protocol query-response)
    and, later, DA1/DA2 device-attribute queries and DSR status reports, which will all
    need the same mechanism. Worth building once, generally, not per-feature.
-3. A `.desktop` file + wofi/launcher integration, once the app is further along —
+2. A `.desktop` file + wofi/launcher integration, once the app is further along —
    right now it's a bare Python module (`python -m puppy.render.app`), not an installed
    application, which is why it doesn't show up in wofi. Low effort whenever it's worth
    doing (a `.desktop` entry pointing at a small wrapper script that activates the venv
    and runs the module), just not a priority while core functionality is still landing.
-4. Separately, whenever there's a spare cycle: live-test `TERM=puppy python -m
+3. Separately, whenever there's a spare cycle: live-test `TERM=puppy python -m
    puppy` (the *text* pass-through harness, `__main__.py`) in a real terminal window (a
    real ncurses/vim session using the terminfo entry, not just `curses.setupterm()`
    accepting it headlessly) — still pending, needs an interactive session, unrelated to

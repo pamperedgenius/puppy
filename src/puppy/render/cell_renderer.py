@@ -2,19 +2,30 @@
 cell as a quad sampling its glyph from a GlyphAtlas texture, composited over
 the cell's background with the confirmed premultiplied "over" blend from
 kitty's real alpha-blend.slang (`result = over + under*(1-over.a)`,
-simplified here since bg is always fully opaque: `fg*alpha + bg*(1-alpha)`).
+simplified here since bg is always fully opaque: `fg*alpha + bg*(1-alpha)`),
+then an underline band (if flagged) drawn as a solid fg-colored line at the
+font's real underline_y/underline_thickness metrics.
 
 Verified against the real GPU before trusting this design: a partially-inked
 synthetic glyph (left half alpha=255, right half alpha=0) produced exact
 pure-fg-color pixels on the inked half and exact pure-bg-color pixels on the
 transparent half -- proves the whole path (texture upload, storage-buffer
 instance data, uniform buffer, quad generation, UV mapping, fragment blend)
-end to end with real numeric pixel readback, not just "didn't crash."
+end to end with real numeric pixel readback, not just "didn't crash." The
+extended 10-float/40-byte Uniforms struct (needed for underline_y/thickness)
+was verified empirically too: a throwaway shader read back exact values from
+every field before this was trusted, not assumed from WGSL alignment rules
+alone (a plain top-level uniform struct only needs its largest-member
+alignment, 8 bytes for vec2<f32> here -- NOT the stricter 16-byte rule that
+applies to storage-buffer array *elements*, confirmed by a 40-byte struct
+round-tripping correctly).
 
-v1 scope: this is the core blend only. Kitty's real cell.slang also does
-HSLuv-based automatic fg/bg contrast override, cursor/selection compositing,
-underline/strikethrough via decoration sprites, and gamma-adjustment modes --
-none of that is built here, see PROGRESS.md.
+v1 scope: this is the core blend + underline only. Kitty's real cell.slang
+also does HSLuv-based automatic fg/bg contrast override, cursor/selection
+compositing, strikethrough, and gamma-adjustment modes -- none of that is
+built here, see PROGRESS.md. Bold is handled entirely on the CPU side (a
+different, emboldened glyph rasterization gets its own atlas slot -- see
+font.py/app.py), not in this shader.
 """
 from __future__ import annotations
 
@@ -32,12 +43,14 @@ struct Instance {
     atlas_row: f32,
     fg: vec4<f32>,
     bg: vec4<f32>,
+    flags: vec4<f32>,  // x = underline (0 or 1), y/z/w reserved
 };
 
 struct Uniforms {
     screen_size: vec2<f32>,
     cell_size: vec2<f32>,
     atlas_grid: vec2<f32>,
+    underline: vec2<f32>,  // x = underline_y (px from cell top), y = thickness (px)
     _pad: vec2<f32>,
 };
 
@@ -51,6 +64,8 @@ struct VOut {
     @location(0) uv: vec2<f32>,
     @location(1) fg: vec4<f32>,
     @location(2) bg: vec4<f32>,
+    @location(3) cell_v: f32,
+    @location(4) underline: f32,
 };
 
 @vertex
@@ -72,13 +87,22 @@ fn vs_main(@builtin(vertex_index) vidx: u32, @builtin(instance_index) iidx: u32)
     out.uv = vec2<f32>((inst.atlas_col + cx) / u.atlas_grid.x, (inst.atlas_row + cy) / u.atlas_grid.y);
     out.fg = inst.fg;
     out.bg = inst.bg;
+    out.cell_v = cy;
+    out.underline = inst.flags.x;
     return out;
 }
 
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let alpha = textureSample(atlas_tex, atlas_samp, in.uv).r;
-    let rgb = in.fg.rgb * alpha + in.bg.rgb * (1.0 - alpha);
+    var rgb = in.fg.rgb * alpha + in.bg.rgb * (1.0 - alpha);
+    if (in.underline > 0.5) {
+        let pixel_y = in.cell_v * u.cell_size.y;
+        let half_thickness = u.underline.y * 0.5;
+        if (abs(pixel_y - u.underline.x) <= half_thickness) {
+            rgb = in.fg.rgb;
+        }
+    }
     return vec4<f32>(rgb, 1.0);
 }
 """
@@ -92,12 +116,13 @@ INSTANCE_DTYPE = np.dtype(
         ("atlas_row", "f4"),
         ("fg", "f4", 4),
         ("bg", "f4", 4),
+        ("flags", "f4", 4),
     ]
 )
 
 
 class CellRenderer:
-    def __init__(self, gpu: GpuContext, atlas: GlyphAtlas, rows: int, cols: int) -> None:
+    def __init__(self, gpu: GpuContext, atlas: GlyphAtlas, rows: int, cols: int, underline_y: float = 0.0, underline_thickness: float = 1.0) -> None:
         self.gpu = gpu
         self.atlas = atlas
         self.rows = rows
@@ -118,14 +143,15 @@ class CellRenderer:
             usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
         )
 
-        # WGSL uniform structs must be 16-byte aligned overall; 3 vec2<f32>
-        # fields (24 bytes) need an explicit pad field to reach 32.
-        uniform_dtype = np.dtype([("screen_size", "f4", 2), ("cell_size", "f4", 2), ("atlas_grid", "f4", 2), ("_pad", "f4", 2)])
+        uniform_dtype = np.dtype(
+            [("screen_size", "f4", 2), ("cell_size", "f4", 2), ("atlas_grid", "f4", 2), ("underline", "f4", 2), ("_pad", "f4", 2)]
+        )
         uniforms = np.zeros(1, dtype=uniform_dtype)
         uniforms[0] = (
             (cols * atlas.cell_width, rows * atlas.cell_height),
             (atlas.cell_width, atlas.cell_height),
             (atlas.cols, atlas.rows),
+            (underline_y, underline_thickness),
             (0, 0),
         )
         self._uniform_buffer = device.create_buffer_with_data(data=uniforms.tobytes(), usage=wgpu.BufferUsage.UNIFORM)
@@ -133,7 +159,7 @@ class CellRenderer:
         bind_group_layout = device.create_bind_group_layout(
             entries=[
                 {"binding": 0, "visibility": wgpu.ShaderStage.VERTEX, "buffer": {"type": wgpu.BufferBindingType.read_only_storage}},
-                {"binding": 1, "visibility": wgpu.ShaderStage.VERTEX, "buffer": {"type": wgpu.BufferBindingType.uniform}},
+                {"binding": 1, "visibility": wgpu.ShaderStage.VERTEX | wgpu.ShaderStage.FRAGMENT, "buffer": {"type": wgpu.BufferBindingType.uniform}},
                 {"binding": 2, "visibility": wgpu.ShaderStage.FRAGMENT, "texture": {"sample_type": wgpu.TextureSampleType.float}},
                 {"binding": 3, "visibility": wgpu.ShaderStage.FRAGMENT, "sampler": {"type": wgpu.SamplerBindingType.filtering}},
             ]
