@@ -515,22 +515,68 @@ puppy/
 dependencies live there, not in system Python. `pip install -e .` again if the venv
 is ever recreated (it's gitignored).
 
-1. **The kitty graphics protocol (RGB/RGBA/PNG direct mode first)** — the next real
-   protocol milestone; everything else in the Milestones list up to here is done. Use
-   the same verification discipline as the rest of this project: the full APC-sequence
-   format, control-data keys, and transmission modes were already captured in the
-   original research doc (`~/Documents/python-terminal-emulator-research.md`) from
-   kitty's real graphics-protocol docs, but re-check against `~/Projects/kitty/kitty/
-   graphics.c`/`parse-graphics-command.h` before trusting specifics, same as every
-   other protocol layer so far. Needs: APC parsing in `Parser` (a new escape-sequence
-   category, `ESC _ ... ESC \`, not built at all yet — `Parser` currently only handles
-   CSI/OSC/ESC-single-char/DCS-adjacent sequences), an image decode path (PNG via
-   Pillow or similar), and a way to composite a decoded image into the GPU render
-   (likely a second texture + a per-cell or per-region draw path, distinct from the
-   glyph atlas). This is a bigger lift than recent milestones — worth scoping
-   deliberately small first (direct RGB/RGBA transmission + display, skip PNG/
-   animation/unicode-placeholder initially) rather than attempting the whole protocol
-   at once.
+1. **The kitty graphics protocol — IN PROGRESS, mid-verification-pass when this was
+   last updated (2026-08-16). Read this whole item before writing any code.**
+   Everything else in the Milestones list above this is done. This is a genuinely
+   bigger lift than recent milestones (kitty's real `graphics.c` is 2803 lines) — the
+   plan below deliberately splits it into a small, fully-testable model-layer pass
+   first, with GPU compositing as a **separate, later** pass. Don't attempt both at
+   once.
+
+   **What's already confirmed from kitty's real source this session** (from
+   `~/Projects/kitty/kitty/parse-graphics-command.h`, which is generated from
+   `apc_parsers.py` — a real, authoritative key-value parser for the control-data
+   string): the control-data key characters are `a`=action, `d`=delete_action,
+   `t`=transmission_type, `o`=compressed, `f`=format, `m`=more (chunking),
+   `i`=id, `I`=image_number, `p`=placement_id, `q`=quiet, `w`/`h`=width/height,
+   `x`/`y`=x_offset/y_offset, `v`/`s`=data_height/data_width, `S`=data_sz,
+   `O`=data_offset, `c`/`r`=num_cells/num_lines, `X`/`Y`=cell_x_offset/
+   cell_y_offset, `z`=z_index, `C`=cursor_movement, `U`=unicode_placement,
+   `P`/`Q`=parent_id/parent_placement_id, `N`=usage_hints, `H`/`V`=offset_from_
+   parent_x/y. This matches the research doc's summary — confirmed, not
+   contradicted, but the *exact dispatch/chunking logic* (how `m=1`/`m=0` chunks
+   get reassembled, what `handle_graphics_command` actually does with a fully
+   parsed command) was **not yet re-checked** — a `grep` for
+   `handle_graphics_command|is_multiframe|more_chunks` in `graphics.c` came back
+   empty right as this got interrupted, so the right function names weren't found
+   yet. Next session: search `graphics.c` differently (try `grep -n "^screen_"
+   graphics.c` or `grep -n "\.more\b" graphics.c` for the chunking-accumulation
+   code, and `grep -n "^grman_" graphics.c` for the image-storage-manager
+   functions, since kitty's own graphics state lives in a `GraphicsManager`
+   struct — `grman_*` — matching the naming this plan already independently
+   converged on below) before trusting the chunking model sketched here.
+
+   **Planned v1 architecture** (model layer only, no rendering yet):
+   - `Parser`: a new APC state (`ESC _ ... ESC \`, distinct from OSC's `ESC ]`
+     handling it can otherwise structurally mirror — buffer-until-`ST`, same
+     `_MAX_OSC_LEN`-style length cap **but sized for images**, not 8KB — either a
+     much larger single-chunk cap (protocol convention chunks payloads at 4096
+     bytes each) or cap total accumulated bytes across chunks at something like
+     64MB, whichever kitty's real behavior turns out to do once the chunking
+     logic above is actually re-checked. This is a real DoS surface (same class
+     as the CSI-param and OSC-buffer fixes earlier) — don't skip capping it just
+     because images are legitimately large.
+   - Parse the control-data string (comma-separated `key=value` pairs) into a
+     dict, split from the base64 payload by finding the first `;`.
+   - `src/puppy/graphics.py`: a `GraphicsManager`-ish model (mirroring kitty's
+     `grman_*` naming once confirmed) holding `images: dict[id, Image]` (decoded
+     RGB/RGBA pixel bytes + width/height) and `placements: list[Placement]`
+     (image_id, cell_row, cell_col, cell span, z_index). `Screen.graphics =
+     GraphicsManager()`, plus a `Screen.graphics_command(control_data, payload)`
+     entry point Parser calls.
+   - **v1 scope, deliberately**: `a=T` (transmit+display) only, `f=24`/`f=32`
+     (direct RGB/RGBA) only — no `f=100` (PNG) yet, no compression (`o=z`), no
+     `a=d` (delete), no `a=q` (query), no animation, no unicode-placeholder,
+     no file/tempfile/shm transmission modes (`t=f`/`t=t`/`t=s`, only `t=d`
+     direct). Each of these is a real, separate follow-up milestone, not
+     something to half-build now.
+   - Test with real, hand-built base64-encoded RGB/RGBA payloads (small, e.g.
+     2x2 pixels) through the actual `Parser`, asserting `Screen.graphics.images`
+     ends up with the exact decoded pixel bytes — same "real data through the
+     real pipeline" discipline as every other protocol layer.
+   - GPU rendering of placed images is explicitly **not** part of this pass —
+     separate texture + draw path, distinct from the glyph atlas, comes after
+     the model layer is solid and tested.
 2. A `.desktop` file + wofi/launcher integration, once the app is further along —
    right now it's a bare Python module (`python -m puppy.render.app`), not an installed
    application, which is why it doesn't show up in wofi. Low effort whenever it's worth
