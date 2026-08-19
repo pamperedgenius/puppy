@@ -23,9 +23,9 @@ DUMP_KEY = 0x1D  # Ctrl+]
 
 def main() -> None:
     cols, rows = shutil.get_terminal_size(fallback=(80, 24))
-    screen = Screen(rows, cols)
-    parser = Parser(screen)
     session = PtySession(rows=rows, cols=cols)
+    screen = Screen(rows, cols, write_back=session.write)
+    parser = Parser(screen)
 
     stdin_fd = sys.stdin.fileno()
     old_termios = termios.tcgetattr(stdin_fd)

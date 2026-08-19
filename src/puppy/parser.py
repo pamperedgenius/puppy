@@ -191,6 +191,12 @@ class Parser:
                 self.sink.set_key_encoding_flags(self._param(0, 0), self._param(1, 1))
             return
         if self._private:
+            if final == "u":
+                # CSI ? u (params ignored, matching kitty's real vt-parser.c:
+                # `if (!end_modifier && start_modifier == '?')` doesn't gate
+                # on param count either).
+                self.sink.report_key_encoding_flags()
+                return
             self._dispatch_private_mode(final)
             return
         if final == "A":

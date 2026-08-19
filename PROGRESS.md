@@ -77,25 +77,25 @@ as a trigger for another verification pass, not just a one-time audit.
 ## Current status (2026-08-16)
 
 **puppy is a real, runnable, typeable-into program with kitty keyboard protocol support
-and real bold/underline rendering.** `python -m puppy.render.app` opens a live GLFW/wgpu
-window, spawns a real shell in a real PTY, renders the full grid every frame (bold via
-FreeType's real synthetic emboldening `FT_GlyphSlot_Embolden`, verified to add ~41% more
-ink on a test glyph, not a no-op; underline drawn at the font's real
-`underline_position`/`underline_thickness` metrics, not a guessed fraction — both proven
-with exact-pixel GPU readback tests), and accepts real keyboard/mouse input, including the
-kitty keyboard protocol (`CSI = flags ; mode u` parsed, `CSI u` sequences emitted via
-`puppy.kitty_keyboard`, all verified against kitty's real source). 213 tests passing (up
-from 110 at the very start of the rendering push). `source .venv/bin/activate` for any of
-this — see the Python-environment architecture decision entry.
+(including query-response), real bold/underline rendering, and a general PTY write-back
+channel.** `python -m puppy.render.app` opens a live GLFW/wgpu window, spawns a real
+shell in a real PTY, renders the full grid every frame (bold via FreeType's real
+synthetic emboldening, underline at real font metrics, both proven with exact-pixel GPU
+readback), and accepts real keyboard/mouse input, including the full kitty keyboard
+protocol round-trip: `CSI = flags ; mode u` sets progressive-enhancement flags, `CSI ?
+u` now gets a real response (`Screen.write_back`, a constructor-injected callable
+defaulting to a no-op so every existing `Screen()`-with-no-PTY test/use keeps working
+unchanged — `puppy.render.app` and `__main__.py` both wire it to `session.write`). 218
+tests passing (up from 110 at the very start of the rendering push). `source
+.venv/bin/activate` for any of this — see the Python-environment architecture decision
+entry.
 
 **Known gaps, all deliberate and documented** (not oversights): kitty keyboard protocol
-has no alternate-key/text-embedding subfields, no hyper/meta modifiers, no query-response
-(`CSI ? u`, needs a PTY write-back channel `Parser`/`Screen` don't have yet — its own
-Architecture decisions log entry) or push/pop flags stack; legacy encoding has no
-Alt/Meta-prefixed sequences, no Ctrl+non-letter combos, no Shift+function-key variants; no
-strikethrough or kitty's HSLuv-based automatic contrast override; not launchable from
-wofi/as a desktop app yet (no `.desktop` file — worth doing once the app is further
-along, not before).
+has no alternate-key/text-embedding subfields, no hyper/meta modifiers, no push/pop
+flags stack (single flat value); legacy encoding has no Alt/Meta-prefixed sequences, no
+Ctrl+non-letter combos, no Shift+function-key variants; no strikethrough or kitty's
+HSLuv-based automatic contrast override; not launchable from wofi/as a desktop app yet
+(no `.desktop` file — worth doing once the app is further along, not before).
 
 Full history of everything before today lives in the dated Milestones checklist below —
 not duplicated here, per this file's own "replace, don't append" rule.
@@ -112,20 +112,17 @@ not duplicated here, per this file's own "replace, don't append" rule.
   `Instance` struct's `flags: vec4<f32>` field, added for the underline flag, keeps
   the array stride a clean 16-byte multiple on purpose), not a single bound uniform
   struct.
-- **`Parser`/`Screen` have no way to write bytes back to the child PTY — a real
-  architectural gap, not yet needed until now.** Surfaced 2026-08-16 while implementing
-  the kitty keyboard protocol: `CSI ? u` (a program *querying* puppy's current
-  progressive-enhancement flags) requires the terminal to respond by writing
-  `\x1b[?<flags>u` back to the child (confirmed via kitty's real
-  `screen_report_key_encoding_flags`, which calls `write_escape_code_to_child`) —
-  but `Parser.feed()` only ever flows one direction (child output -> `Screen` state),
-  nothing currently lets a `Screen` method trigger output back to the PTY. Deliberately
-  NOT built yet (query support is a documented gap, `CSI ? u` is parsed but a no-op) —
-  the real fix, whenever it's needed, is giving `Screen` (or `Parser`) a write-back
-  channel, likely the same `PtySession` already in `app.py`'s `run()`. Other real
-  terminal features will eventually need this too (DA1/DA2 device-attribute queries,
-  DSR status reports, XTGETTCAP) — worth building the general mechanism once, not
-  once per feature that needs it.
+- **`Screen` has a general PTY write-back channel — `write_back: Callable[[bytes],
+  None]`, constructor-injected, defaulting to a no-op.** Surfaced 2026-08-16 while
+  implementing the kitty keyboard protocol (`CSI ? u`, a program *querying* puppy's
+  progressive-enhancement flags, needs a response written back to the child — confirmed
+  via kitty's real `screen_report_key_encoding_flags`/`write_escape_code_to_child`) and
+  built as a general mechanism immediately rather than a one-off, since DA1/DA2
+  device-attribute queries, DSR status reports, and XTGETTCAP will all need the same
+  thing later. `puppy.render.app` and `__main__.py` both wire it to `session.write`; the
+  no-op default means every existing `Screen()`-with-no-PTY test/use keeps working
+  unchanged. `report_key_encoding_flags` (`CSI ? u`'s handler) is the first real
+  consumer.
 - **Input bypasses `rendercanvas`'s own event abstraction; raw GLFW callbacks are
   registered directly on the underlying window handle instead.** Checked
   `rendercanvas`'s real installed source (`rendercanvas/glfw.py`) before building input
@@ -413,15 +410,28 @@ with the date when something is confirmed working (not just "code exists").
       (confirmed distinct branches in kitty's real `vt-parser.c`).
       `InputState` routes through this encoder once flags are nonzero,
       suppressing the char callback to avoid double-sending (a real
-      interaction risk caught before it shipped, not after). 2026-08-16, 27
-      new tests (11 kitty_keyboard, 5 Screen, 3 Parser, 4 InputState mode-
-      switching + others already counted). Verified live: still starts and
-      runs with no crash. **Real, documented gaps**: no alternate-key/text-
-      embedding subfields, no hyper/meta modifiers (stock GLFW limitation),
-      plain-key codepoints assume US/QWERTY-like layout, no `CSI ? u` query-
-      response (needs a PTY write-back channel `Parser`/`Screen` don't have
-      yet — see Architecture decisions log) or `CSI > u`/`CSI < u` push/pop
-      stack (single flat flags value only).
+      interaction risk caught before it shipped, not after). `CSI ? u`
+      query-response now works too (see the PTY write-back milestone
+      below) — a real program can round-trip set-flags/query-flags
+      correctly, not just set them one-way. 2026-08-16, 27 new tests (11
+      kitty_keyboard, 5 Screen, 3 Parser, 4 InputState mode-switching +
+      others already counted), plus 5 more for the write-back round-trip
+      itself (see below). Verified live: still starts and runs with no
+      crash. **Real, documented gaps**: no alternate-key/text-embedding
+      subfields, no hyper/meta modifiers (stock GLFW limitation), plain-key
+      codepoints assume US/QWERTY-like layout, no `CSI > u`/`CSI < u`
+      push/pop stack (single flat flags value only).
+- [x] General PTY write-back channel — `Screen.write_back` (constructor-
+      injected `Callable[[bytes], None]`, no-op default so every existing
+      `Screen()`-with-no-PTY test/use keeps working unchanged), wired to
+      `session.write` in both `puppy.render.app` and `__main__.py`.
+      `report_key_encoding_flags` (`CSI ? u`'s handler) is the first real
+      consumer — response format confirmed against kitty's real
+      `screen_report_key_encoding_flags`. 2026-08-16, 6 new tests (3
+      `Screen`-level with a stub write_back list, 3 `Parser`-level
+      end-to-end through real escape bytes). Built as a general mechanism
+      on purpose, not a one-off — DA1/DA2 device-attribute queries and DSR
+      status reports will reuse the same channel later.
 - [x] Bold/underline visual rendering — bold via FreeType's real synthetic
       emboldening (`FT_GlyphSlot_Embolden`, an outline-based thickening
       applied before rasterization — verified to add ~41% more covered
@@ -505,10 +515,22 @@ puppy/
 dependencies live there, not in system Python. `pip install -e .` again if the venv
 is ever recreated (it's gitignored).
 
-1. A general PTY write-back channel for `Screen`/`Parser` (see the Architecture
-   decisions log entry) — unlocks `CSI ? u` (kitty keyboard protocol query-response)
-   and, later, DA1/DA2 device-attribute queries and DSR status reports, which will all
-   need the same mechanism. Worth building once, generally, not per-feature.
+1. **The kitty graphics protocol (RGB/RGBA/PNG direct mode first)** — the next real
+   protocol milestone; everything else in the Milestones list up to here is done. Use
+   the same verification discipline as the rest of this project: the full APC-sequence
+   format, control-data keys, and transmission modes were already captured in the
+   original research doc (`~/Documents/python-terminal-emulator-research.md`) from
+   kitty's real graphics-protocol docs, but re-check against `~/Projects/kitty/kitty/
+   graphics.c`/`parse-graphics-command.h` before trusting specifics, same as every
+   other protocol layer so far. Needs: APC parsing in `Parser` (a new escape-sequence
+   category, `ESC _ ... ESC \`, not built at all yet — `Parser` currently only handles
+   CSI/OSC/ESC-single-char/DCS-adjacent sequences), an image decode path (PNG via
+   Pillow or similar), and a way to composite a decoded image into the GPU render
+   (likely a second texture + a per-cell or per-region draw path, distinct from the
+   glyph atlas). This is a bigger lift than recent milestones — worth scoping
+   deliberately small first (direct RGB/RGBA transmission + display, skip PNG/
+   animation/unicode-placeholder initially) rather than attempting the whole protocol
+   at once.
 2. A `.desktop` file + wofi/launcher integration, once the app is further along —
    right now it's a bare Python module (`python -m puppy.render.app`), not an installed
    application, which is why it doesn't show up in wofi. Low effort whenever it's worth

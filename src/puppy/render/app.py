@@ -75,9 +75,9 @@ def run(rows: int = 24, cols: int = 80, pixel_size: int = 16) -> None:
         window.gpu, atlas, rows, cols, underline_y=font.underline_y, underline_thickness=font.underline_thickness
     )
 
-    screen = Screen(rows, cols)
-    parser = Parser(screen)
     session = PtySession(rows=rows, cols=cols)
+    screen = Screen(rows, cols, write_back=session.write)
+    parser = Parser(screen)
 
     input_state = InputState(session, screen, font)
     window.set_key_handler(input_state.on_key)

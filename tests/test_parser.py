@@ -277,8 +277,22 @@ def test_csi_equals_u_with_mode_param():
     assert screen.key_encoding_flags == 0b11
 
 
-def test_csi_question_u_query_is_ignored_not_crashed():
-    # Real, documented gap: query-response needs writing back to the child,
-    # not built yet -- must not crash or corrupt parser state.
+def test_csi_question_u_query_does_not_disturb_normal_parsing():
     screen = _run(b"\x1b[?u" + b"ok")
     assert screen.dump_text().splitlines()[0] == "ok"
+
+
+def test_csi_question_u_query_writes_response_via_write_back():
+    writes = []
+    screen = Screen(rows=5, cols=20, write_back=writes.append)
+    parser = Parser(screen)
+    parser.feed(b"\x1b[=1u\x1b[?u")
+    assert writes == [b"\x1b[?1u"]
+
+
+def test_csi_question_u_with_no_flags_set_reports_zero():
+    writes = []
+    screen = Screen(rows=5, cols=20, write_back=writes.append)
+    parser = Parser(screen)
+    parser.feed(b"\x1b[?u")
+    assert writes == [b"\x1b[?0u"]

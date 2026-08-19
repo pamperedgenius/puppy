@@ -2,11 +2,18 @@
 scrollback, private-mode tracking, and OSC metadata (title/palette/clipboard).
 
 No rendering, no PTY awareness — a Screen is just a model that a Parser writes into.
+The one exception is `write_back`: some real sequences (device/mode *queries*, not
+just settings) require the terminal to respond by writing bytes back to the child --
+`report_key_encoding_flags` (CSI ? u) is the first consumer, confirmed against kitty's
+real `screen_report_key_encoding_flags` (`write_escape_code_to_child`). Future
+query-style features (DA1/DA2 device attributes, DSR status reports) will reuse the
+same `write_back` callable rather than inventing their own channel.
 """
 from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
+from typing import Callable
 
 
 @dataclass
@@ -24,7 +31,17 @@ class Screen:
     _SGR_COLORS_FG = set(range(30, 38)) | set(range(90, 98))
     _SGR_COLORS_BG = set(range(40, 48)) | set(range(100, 108))
 
-    def __init__(self, rows: int = 24, cols: int = 80, scrollback_limit: int = 2000) -> None:
+    def __init__(
+        self,
+        rows: int = 24,
+        cols: int = 80,
+        scrollback_limit: int = 2000,
+        write_back: Callable[[bytes], None] | None = None,
+    ) -> None:
+        # No-op by default so every existing Screen()-with-no-PTY test/use
+        # keeps working unchanged; real callers (puppy.render.app, __main__.py)
+        # pass session.write.
+        self._write_back: Callable[[bytes], None] = write_back or (lambda data: None)
         self.rows = rows
         self.cols = cols
         self.cursor_row = 0
@@ -90,6 +107,11 @@ class Screen:
             self.key_encoding_flags |= q
         elif how == 3:
             self.key_encoding_flags &= ~q
+
+    def report_key_encoding_flags(self) -> None:
+        """CSI ? u (query): responds with CSI ? <flags> u, exact format
+        confirmed against kitty's real screen_report_key_encoding_flags."""
+        self._write_back(f"\x1b[?{self.key_encoding_flags}u".encode("ascii"))
 
     def set_private_mode(self, mode: int, enabled: bool) -> None:
         if enabled:

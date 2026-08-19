@@ -467,3 +467,23 @@ def test_key_encoding_flags_masked_to_7_bits():
     s = Screen()
     s.set_key_encoding_flags(0xFF, how=1)
     assert s.key_encoding_flags == 0x7F
+
+
+def test_write_back_defaults_to_noop_when_none_given():
+    s = Screen()
+    s.report_key_encoding_flags()  # must not raise with no write_back configured
+
+
+def test_report_key_encoding_flags_writes_correct_response():
+    writes = []
+    s = Screen(write_back=writes.append)
+    s.set_key_encoding_flags(0b11)
+    s.report_key_encoding_flags()
+    assert writes == [b"\x1b[?3u"]
+
+
+def test_report_key_encoding_flags_reflects_zero_by_default():
+    writes = []
+    s = Screen(write_back=writes.append)
+    s.report_key_encoding_flags()
+    assert writes == [b"\x1b[?0u"]
