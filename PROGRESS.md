@@ -135,8 +135,101 @@ it's just no longer doing double duty as the fix for the initial-size race. Veri
 248 tests still pass; the headless Screen/PtySession repro (bypassing the GPU
 entirely) now renders `unifetch`'s real output cleanly at the correct queried size; a
 `timeout 5 python -m puppy.render.app` smoke test still starts/runs 5s with no
-crash/traceback. **Not yet live-confirmed with the actual GPU window** — that's the
-first thing to check next, along with re-checking theming.
+crash/traceback.
+
+**Phase 4 (same conversation, continued): user live-tested the phase-3 fix.**
+Sizing/rendering **confirmed fixed** — screenshot showed cleanly aligned, non-garbled
+text, no more split/duplicated lines. Mod+Q still confirmed working. User asked two
+things: (1) is theming "still not its strong suite," and (2) how far along is puppy
+overall / is anything left before moving to personalizing it, noting it's "not on par
+with kitty, ghostty or even OdyTTY." The maturity question is legitimate and worth
+answering honestly next session — puppy has real breadth (baseline VT100/xterm, 256/
+truecolor, scrollback, alt-screen, kitty keyboard protocol w/ query-response, kitty
+graphics protocol w/ real GPU image rendering, real bold/underline) but is still
+finding "real window, real timing" bugs each live-test pass, which is normal for a
+project at this stage but does mean it isn't at daily-driver parity yet — say this
+plainly if asked again, don't oversell it.
+
+**Theming bug — real, confirmed, root cause NOT yet found; here is the full narrowing
+so the next session doesn't repeat this work.** User's screenshot showed a white/pale
+background behind the ascii-art box and the stats panel, while everything outside those
+regions (and the color swatches) showed the correct dark navy. Investigated by layering
+verification from the model outward, each layer independently proven correct before
+moving to the next:
+1. **`Screen` model, using the real captured byte stream**: spawned a real `PtySession`
+   running the user's actual shell (`SHELL=/home/teter/.local/bin/tish` — this machine's
+   default `$SHELL` under a plain bash tool session is `/bin/bash`, NOT `tish`, so any
+   repro must set `SHELL=` explicitly or it silently won't exercise tish's real startup
+   behavior, including its auto-run of `unifetch`), captured the raw bytes to
+   `/tmp/.../tish_raw2.bin` (~5.6KB, confirmed complete — two separate captures at 4s
+   and 8s durations produced byte-identical length). Fed those exact bytes through
+   `Parser`+`Screen`, inspected **every cell** in a printed row (`os`/`host` line, cols
+   48-94, including both actual glyph cells and the space-padding within/after the
+   printed text) — every single one resolves to `bg=None` → theme's `(0, 0, 41)` navy,
+   with zero exceptions. Also grepped both raw captures for `7m`/`27m`/`48;` (reverse
+   video / explicit background SGR codes) — **none exist anywhere in the stream**, so
+   this is not a reverse-video or stray-background-escape bug. Model is clean.
+2. **Full CPU→GPU pipeline, offscreen (no live window)**: built a standalone repro using
+   the *exact* app.py code path (`build_instances`, real `FontRenderer`, real
+   `GlyphAtlas`, real `CellRenderer`, real loaded `midnight2` theme) against an
+   `rendercanvas.offscreen.RenderCanvas` sized to the real grid, fed the same captured
+   byte stream, read back actual GPU pixels. A cell known-blank from the model sampled
+   as exactly `(0, 0, 41, 255)`; the mean color over a sampled grid across the whole
+   frame was `(0.97, 0.92, 42.1)` — overwhelmingly navy, consistent with mostly-background
+   plus a few bright accent pixels. **The offscreen full pipeline is also clean.**
+3. **The live GLFW window itself**: this is where it actually goes wrong, and *only*
+   here. Built a repeatable, low-disruption way to inspect this without pestering the
+   user for more screenshots or repeatedly stealing focus (see the "Live-render
+   debugging technique" note below) — launched `python -m puppy.render.app` in the
+   background with `SHELL=tish` via `timeout`, polled `niri msg --json windows` for a
+   window titled `"puppy"` to appear, then took one `grim` screenshot the moment it did.
+   Two such captures (one under plain `bash` — no `unifetch` autorun, showed a clean
+   navy prompt with nothing wrong — and one under `tish` with `unifetch` running) both
+   confirm: **the bug only appears on cells that were actually printed to** (including
+   trailing/padding space characters within a printed line) — grid regions the model
+   never wrote to at all render with the correct navy background. This cell-content-
+   dependent pattern is the strongest clue so far and rules out anything that would be
+   uniform across the whole surface (a wrong clear color, a wrong surface format, a
+   global uniform-buffer mixup).
+4. **Ruled out as the cause**: reverse video / explicit-bg escape codes (none in the
+   stream, see #1); a global fg/bg swap in `build_instances`'s call site (checked, the
+   `default_fg=theme.fg, default_bg=theme.bg` kwargs are correctly *not* swapped);
+   sRGB/format mismatch between offscreen (`rgba8unorm-srgb`) and live
+   (`bgra8unorm-srgb`) surfaces — both are properly sRGB, and `gpu.format` is correctly
+   threaded into pipeline creation for whichever canvas is used, so wgpu should handle
+   the channel-order difference transparently; a phantom-ink bold-space glyph (tested
+   both bold and non-bold rasterization of `' '` with the real font — both are a true
+   0x0 empty bitmap, nothing to blit).
+5. **Not yet checked (next session, in this order)**: (a) whether a *non-space*, bold
+   glyph's rasterized bitmap has any stray alpha bleeding past its own cell bounds into
+   a neighbor (the whole unifetch stream is wrapped in `\x1b[1m` — bold — almost
+   everywhere, unlike the isolated bold-space test which only checked the empty-glyph
+   case); (b) whether this is specific to the *live, continuously-redrawn* frame loop
+   vs. the offscreen test's one-shot `render()` call — i.e. a `sync_atlas()`/
+   `write_texture` ordering or GPU-queue-synchronization issue that only manifests
+   across multiple real frames, not a single offscreen draw (try looping `render()`
+   several times against the offscreen canvas with atlas mutations between calls,
+   matching the live per-frame `build_instances()` → `render()` pattern, before
+   assuming it needs the *actual* GLFW/live surface to reproduce); (c) whether
+   `CellRenderer.resize()` specifically (as opposed to the fresh `_allocate()` the
+   offscreen test only exercises once at construction) leaves the instance buffer or
+   bind group in a bad state the first time it's *reused* across a resize — the phase-3
+   fix means the live app now gets its correct size before the shell spawns, so
+   `resize()` may not even fire during a normal launch, but worth ruling in/out
+   explicitly since it's still new code exercised only by unit tests so far, not by any
+   of the live-repro passes done this session specifically with print instrumentation
+   inside it.
+
+**Live-render debugging technique (new this session, reusable)**: to inspect what's
+*actually* on screen in the live GLFW window without repeatedly focusing/closing
+windows on the user's desktop (disruptive, see the standing rule about this) —
+`(timeout N python -m puppy.render.app &)`, poll
+`niri msg --json windows` in a loop for a window with `"title": "puppy"` to appear
+(usually near-instant), then a single `grim` call for a full-output screenshot,
+read via the Read tool. One launch, one shot, no manual interaction. Remember to set
+`SHELL=/home/teter/.local/bin/tish` explicitly when the repro needs to match the user's
+real shell (this machine's default `$SHELL` in a plain bash tool session is
+`/bin/bash`, which won't auto-run `unifetch` the way the user's real launches do).
 
 1. **"doesn't close with Mod+Q" — root cause definitively confirmed, fixed.** Not a
    niri/Wayland compatibility problem. `app.py`'s main loop calls `glfw.poll_events()`
