@@ -35,7 +35,19 @@ class Window:
         return self.canvas._window
 
     def should_close(self) -> bool:
-        return self.canvas.get_closed()
+        # Real, confirmed bug fixed here (2026-08-20): app.py's main loop calls
+        # glfw.poll_events() directly (raw GLFW, bypassing rendercanvas's own
+        # event loop) so it never reaches rendercanvas's _rc_gui_poll -> _maybe_close,
+        # the only place that was checking glfw.window_should_close() and turning it
+        # into canvas.get_closed()==True. That meant a WM close request (Mod+Q in
+        # niri, which asks GLFW's Wayland backend to set the close flag exactly like
+        # any other platform's window-manager close button) was silently never
+        # detected -- not a niri/Wayland compatibility problem, puppy just never
+        # looked. Checking the raw GLFW flag directly here is a self-contained fix
+        # that doesn't depend on rendercanvas's private _rc_* polling internals.
+        if self.canvas.get_closed():
+            return True
+        return glfw.window_should_close(self._glfw_handle)
 
     def poll_events(self) -> None:
         glfw.poll_events()
@@ -69,3 +81,21 @@ class Window:
     def set_scroll_handler(self, handler) -> None:
         """handler(xoffset: float, yoffset: float)."""
         glfw.set_scroll_callback(self._glfw_handle, lambda _win, x, y: handler(x, y))
+
+    def set_framebuffer_size_handler(self, handler) -> None:
+        """handler(width: int, height: int) -- real framebuffer pixel size,
+        fires on every resize. rendercanvas already registers its own
+        framebuffer-size callback (to reconfigure the wgpu surface, which
+        this doesn't touch/replace -- see the module docstring on why input
+        callbacks specifically are overridden but resize/close/focus aren't);
+        GLFW supports multiple callbacks are NOT stacked, only the most
+        recently registered one fires, so this intentionally chains to
+        rendercanvas's own handler first before calling the caller's."""
+        rc_handler = glfw.set_framebuffer_size_callback(self._glfw_handle, None)  # peek/clear, restored below
+
+        def _on_resize(_win, width, height):
+            if rc_handler is not None:
+                rc_handler(_win, width, height)
+            handler(width, height)
+
+        glfw.set_framebuffer_size_callback(self._glfw_handle, _on_resize)

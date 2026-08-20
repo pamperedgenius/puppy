@@ -135,6 +135,44 @@ def test_underline_draws_fg_colored_band_at_real_metrics_position():
     assert list(img[6, 3]) == [255, 0, 0, 255]  # underline row: fg color
 
 
+def test_resize_grows_grid_and_new_cells_render_correctly():
+    # Real bug this guards against: before CellRenderer.resize() existed, the
+    # instance buffer/uniform screen_size were fixed at construction time, so
+    # a grid grown after a real window resize would either not fit in the
+    # buffer or render at the stale (pre-resize) screen_size, stretching the
+    # grid to fill whatever the real surface actually became -- niri in
+    # particular always overrides an app's requested initial window size.
+    cell_w, cell_h = 4, 4
+    atlas = GlyphAtlas(cell_width=cell_w, cell_height=cell_h, ascender=cell_h)
+    full_ink = GlyphBitmap(width=cell_w, height=cell_h, bearing_x=0, bearing_y=cell_h, pixels=bytes([255] * cell_w * cell_h))
+    slot = atlas.get_or_add(1, full_ink)
+
+    canvas = offscreen.RenderCanvas(size=(cell_w * 2, cell_h))
+    gpu = GpuContext.create(canvas)
+    renderer = CellRenderer(gpu, atlas, rows=1, cols=1)  # starts smaller than the real 2-cell-wide surface
+
+    renderer.resize(rows=1, cols=2)
+    instances = np.zeros(2, dtype=INSTANCE_DTYPE)
+    instances[0] = (0, 0, slot.col, slot.row, srgb_color(255, 0, 0), srgb_color(0, 0, 0), (0, 0, 0, 0))
+    instances[1] = (1, 0, slot.col, slot.row, srgb_color(0, 255, 0), srgb_color(0, 0, 0), (0, 0, 0, 0))
+    canvas.request_draw(lambda: renderer.render(instances))
+    img = canvas.draw()
+
+    assert list(img[2, 1]) == [255, 0, 0, 255]  # left cell: red, at the correct (post-resize) NDC scale
+    assert list(img[2, 5]) == [0, 255, 0, 255]  # right cell: green, not stretched/misaligned
+
+
+def test_resize_to_same_dimensions_is_a_no_op():
+    cell_w, cell_h = 4, 4
+    atlas = GlyphAtlas(cell_width=cell_w, cell_height=cell_h, ascender=cell_h)
+    canvas = offscreen.RenderCanvas(size=(cell_w, cell_h))
+    gpu = GpuContext.create(canvas)
+    renderer = CellRenderer(gpu, atlas, rows=1, cols=1)
+    buffer_before = renderer._instance_buffer
+    renderer.resize(rows=1, cols=1)
+    assert renderer._instance_buffer is buffer_before
+
+
 def test_underline_flag_off_never_draws_a_band():
     cell_w, cell_h = 8, 8
     atlas = GlyphAtlas(cell_width=cell_w, cell_height=cell_h, ascender=cell_h)

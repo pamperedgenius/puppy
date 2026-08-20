@@ -121,12 +121,19 @@ INSTANCE_DTYPE = np.dtype(
 )
 
 
+_UNIFORM_DTYPE = np.dtype(
+    [("screen_size", "f4", 2), ("cell_size", "f4", 2), ("atlas_grid", "f4", 2), ("underline", "f4", 2), ("_pad", "f4", 2)]
+)
+
+
 class CellRenderer:
     def __init__(self, gpu: GpuContext, atlas: GlyphAtlas, rows: int, cols: int, underline_y: float = 0.0, underline_thickness: float = 1.0) -> None:
         self.gpu = gpu
         self.atlas = atlas
         self.rows = rows
         self.cols = cols
+        self._underline_y = underline_y
+        self._underline_thickness = underline_thickness
         device = gpu.device
 
         shader = device.create_shader_module(code=_SHADER_SOURCE)
@@ -137,26 +144,9 @@ class CellRenderer:
             usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST,
         )
         self._sampler = device.create_sampler()
+        self._uniform_buffer = device.create_buffer(size=_UNIFORM_DTYPE.itemsize, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
 
-        self._instance_buffer = device.create_buffer(
-            size=max(1, rows * cols) * INSTANCE_DTYPE.itemsize,
-            usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
-        )
-
-        uniform_dtype = np.dtype(
-            [("screen_size", "f4", 2), ("cell_size", "f4", 2), ("atlas_grid", "f4", 2), ("underline", "f4", 2), ("_pad", "f4", 2)]
-        )
-        uniforms = np.zeros(1, dtype=uniform_dtype)
-        uniforms[0] = (
-            (cols * atlas.cell_width, rows * atlas.cell_height),
-            (atlas.cell_width, atlas.cell_height),
-            (atlas.cols, atlas.rows),
-            (underline_y, underline_thickness),
-            (0, 0),
-        )
-        self._uniform_buffer = device.create_buffer_with_data(data=uniforms.tobytes(), usage=wgpu.BufferUsage.UNIFORM)
-
-        bind_group_layout = device.create_bind_group_layout(
+        self._bind_group_layout = device.create_bind_group_layout(
             entries=[
                 {"binding": 0, "visibility": wgpu.ShaderStage.VERTEX, "buffer": {"type": wgpu.BufferBindingType.read_only_storage}},
                 {"binding": 1, "visibility": wgpu.ShaderStage.VERTEX | wgpu.ShaderStage.FRAGMENT, "buffer": {"type": wgpu.BufferBindingType.uniform}},
@@ -164,8 +154,38 @@ class CellRenderer:
                 {"binding": 3, "visibility": wgpu.ShaderStage.FRAGMENT, "sampler": {"type": wgpu.SamplerBindingType.filtering}},
             ]
         )
+        pipeline_layout = device.create_pipeline_layout(bind_group_layouts=[self._bind_group_layout])
+        self._pipeline = device.create_render_pipeline(
+            layout=pipeline_layout,
+            vertex={"module": shader, "entry_point": "vs_main"},
+            fragment={"module": shader, "entry_point": "fs_main", "targets": [{"format": gpu.format}]},
+            primitive={"topology": wgpu.PrimitiveTopology.triangle_list},
+        )
+        self._instance_buffer = None
+        self._bind_group = None
+        self._allocate(rows, cols)
+        self._upload_atlas_full()
+
+    def _allocate(self, rows: int, cols: int) -> None:
+        """(Re)creates the instance buffer sized for rows*cols, the bind
+        group referencing it, and pushes the current screen_size/cell_size
+        into the uniform buffer. Called from __init__ and from resize()."""
+        device = self.gpu.device
+        self._instance_buffer = device.create_buffer(
+            size=max(1, rows * cols) * INSTANCE_DTYPE.itemsize,
+            usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
+        )
+        uniforms = np.zeros(1, dtype=_UNIFORM_DTYPE)
+        uniforms[0] = (
+            (cols * self.atlas.cell_width, rows * self.atlas.cell_height),
+            (self.atlas.cell_width, self.atlas.cell_height),
+            (self.atlas.cols, self.atlas.rows),
+            (self._underline_y, self._underline_thickness),
+            (0, 0),
+        )
+        device.queue.write_buffer(self._uniform_buffer, 0, uniforms.tobytes())
         self._bind_group = device.create_bind_group(
-            layout=bind_group_layout,
+            layout=self._bind_group_layout,
             entries=[
                 {"binding": 0, "resource": {"buffer": self._instance_buffer, "offset": 0, "size": self._instance_buffer.size}},
                 {"binding": 1, "resource": {"buffer": self._uniform_buffer, "offset": 0, "size": self._uniform_buffer.size}},
@@ -173,14 +193,22 @@ class CellRenderer:
                 {"binding": 3, "resource": self._sampler},
             ],
         )
-        pipeline_layout = device.create_pipeline_layout(bind_group_layouts=[bind_group_layout])
-        self._pipeline = device.create_render_pipeline(
-            layout=pipeline_layout,
-            vertex={"module": shader, "entry_point": "vs_main"},
-            fragment={"module": shader, "entry_point": "fs_main", "targets": [{"format": gpu.format}]},
-            primitive={"topology": wgpu.PrimitiveTopology.triangle_list},
-        )
-        self._upload_atlas_full()
+
+    def resize(self, rows: int, cols: int) -> None:
+        """Reallocates the instance buffer and updates screen_size for a new
+        grid shape -- e.g. after a real window resize (see app.py's
+        framebuffer-resize handler). A real, confirmed bug this fixes: before
+        this existed, the grid was drawn using whatever rows/cols the window
+        opened with even after the *actual* surface (and PTY/Screen) resized
+        underneath it, stretching the fixed-size grid to fill a differently
+        sized surface -- niri in particular never honors an app's requested
+        initial window size (it sizes new windows from its own
+        default-column-width policy instead), so this wasn't a rare edge
+        case, it fired on every single launch."""
+        if rows == self.rows and cols == self.cols:
+            return
+        self.rows, self.cols = rows, cols
+        self._allocate(rows, cols)
 
     def _upload_atlas_full(self) -> None:
         self.gpu.device.queue.write_texture(
