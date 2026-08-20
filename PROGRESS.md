@@ -103,9 +103,40 @@ and it doesnt close with mod q as if its not listening to niri commands." All fi
 investigated by reading real source (this codebase's, rendercanvas's, and checking this
 system's real niri config) rather than guessed at. Three have real, source-confirmed
 root causes that are now fixed; one is measured and diagnosed with no quick fix
-identified; one (theming) was simply never built and now is. **None of the fixes below
-have been live-confirmed by the user yet — that's the very first thing to do in the next
-session**, before anything else on this list.
+identified; one (theming) was simply never built and now is.
+
+**Phase 3 (same day, next conversation): user live-tested the phase-2 fixes.** Results —
+Mod+Q **confirmed fixed**, closes correctly now. Theming **partially confirmed** ("kinda
+working" — not fully verified, not re-investigated this pass, revisit next). Sizing/
+rendering **still broken** — screenshot showed garbled/split text and large solid-color
+blocks. User's own guess was "maybe more protocols are needed." **That guess was
+checked and ruled out**, not just dismissed: reproduced the corruption directly against
+`Screen`+`PtySession`+`Parser` with zero GPU/rendering code involved (fed real
+`unifetch` output through the actual PTY layer, dumped the grid) — the corruption
+showed up in the **screen model itself**, not the renderer, and disappeared entirely
+when the same repro ran at a *fixed* size with no resize event. That isolates it to a
+timing bug, not missing protocol coverage. Root cause: `app.py`'s `run()` created
+`Window` (which gets its real niri-assigned size immediately — confirmed via a direct
+probe, `glfw.get_framebuffer_size()` already returns it right after window creation, no
+settling/poll_events loop needed) but then still spawned `PtySession`/`Screen`/
+`CellRenderer` at the function's *stale default* `rows=24, cols=80`, relying on the
+async framebuffer-resize callback (the phase-2 fix) to correct it later. The shell's rc
+file auto-runs `unifetch` immediately on spawn, so it starts printing at the wrong
+80-column width; when the resize callback's `screen.resize()` then fires mid-print, the
+grid rewraps at a *different* column boundary than the already-in-flight output
+assumed, chopping/duplicating lines — reproduced exactly this way (inject a
+`screen.resize()`/`session.resize()` call ~150ms into a real `unifetch` run) before
+touching any fix code, and confirmed the corruption vanishes when the correct size is
+used from the start instead. Fix: `Window.get_framebuffer_size()` (new, `window.py`) is
+now called in `app.py`'s `run()` **before** `PtySession`/`Screen`/`CellRenderer` are
+constructed, so the shell never starts at the wrong width in the first place — the
+resize callback still exists and still matters for genuine *later* interactive resizes,
+it's just no longer doing double duty as the fix for the initial-size race. Verified:
+248 tests still pass; the headless Screen/PtySession repro (bypassing the GPU
+entirely) now renders `unifetch`'s real output cleanly at the correct queried size; a
+`timeout 5 python -m puppy.render.app` smoke test still starts/runs 5s with no
+crash/traceback. **Not yet live-confirmed with the actual GPU window** — that's the
+first thing to check next, along with re-checking theming.
 
 1. **"doesn't close with Mod+Q" — root cause definitively confirmed, fixed.** Not a
    niri/Wayland compatibility problem. `app.py`'s main loop calls `glfw.poll_events()`
@@ -126,7 +157,9 @@ session**, before anything else on this list.
    never looked at it. Self-contained, doesn't depend on rendercanvas's private `_rc_*`
    polling internals.
 2. **"font is too big" + "rendering not properly" — one shared root cause, confirmed via
-   source + this system's real niri config, fixed.** `puppy.render.app` never handled
+   source + this system's real niri config, fixed (but incompletely — see the phase 3
+   entry above for the second, deeper bug, a PTY startup-size race, this alone didn't
+   catch).** `puppy.render.app` never handled
    window resize at all (confirmed: zero resize wiring existed anywhere in `render/`).
    `CellRenderer` computed a fixed `screen_size` uniform once at construction from
    `cols*cell_width x rows*cell_height` and never updated it. Checked this system's real

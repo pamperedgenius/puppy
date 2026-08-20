@@ -90,6 +90,26 @@ def run(rows: int = 24, cols: int = 80, pixel_size: int = 16) -> None:
     font = FontRenderer(font_path, pixel_size)
     atlas = GlyphAtlas(font.cell_width, font.cell_height, font.ascender)
     window = Window(rows, cols, font.cell_width, font.cell_height, title="puppy")
+
+    # Real, confirmed bug fixed here (2026-08-20, found live-testing the
+    # previous resize fix): niri assigns the window its real tiled size
+    # during creation itself (confirmed: window.get_framebuffer_size()
+    # already returns it right after Window() returns, no settling needed),
+    # but this code used to keep spawning the PTY/Screen at the *requested*
+    # rows/cols (24x80) regardless, relying on the async framebuffer-resize
+    # callback to correct it later. The shell's rc file (which auto-runs a
+    # fetch tool here) starts printing immediately at the wrong 80-column
+    # width, and when the resize callback then calls screen.resize() mid
+    # print, the grid rewraps at a *different* column boundary than the
+    # already-in-flight output assumed -- corrupting already-correct lines
+    # (confirmed by reproducing it directly against Screen/PtySession,
+    # bypassing the GPU entirely, with a resize injected mid-stream). Fix:
+    # query the real size up front and use it for the PTY's initial size, so
+    # the shell never starts at the wrong width in the first place.
+    real_width, real_height = window.get_framebuffer_size()
+    cols = max(1, real_width // font.cell_width)
+    rows = max(1, real_height // font.cell_height)
+
     renderer = CellRenderer(
         window.gpu, atlas, rows, cols, underline_y=font.underline_y, underline_thickness=font.underline_thickness
     )

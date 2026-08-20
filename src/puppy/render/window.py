@@ -34,6 +34,17 @@ class Window:
     def _glfw_handle(self):
         return self.canvas._window
 
+    def get_framebuffer_size(self) -> tuple[int, int]:
+        """Real current framebuffer pixel size. Confirmed empirically (not
+        assumed): GLFW's Wayland backend already does the compositor
+        round-trip during window creation, so this reflects niri's actual
+        assigned size (e.g. its `default-column-width` tiling policy)
+        immediately after `Window.__init__` returns -- no poll_events()
+        settling loop needed. See app.py's `run()` for why the caller must
+        use this instead of its originally-requested rows/cols before
+        spawning the PTY."""
+        return glfw.get_framebuffer_size(self._glfw_handle)
+
     def should_close(self) -> bool:
         # Real, confirmed bug fixed here (2026-08-20): app.py's main loop calls
         # glfw.poll_events() directly (raw GLFW, bypassing rendercanvas's own
