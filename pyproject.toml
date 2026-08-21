@@ -9,6 +9,7 @@ dependencies = [
     "rendercanvas",
     "uharfbuzz",
     "freetype-py",
+    "pillow",
 ]
 
 [build-system]

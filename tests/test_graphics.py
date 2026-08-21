@@ -1,10 +1,27 @@
 import base64
+import io
+import zlib
 
+import puppy.graphics as graphics_module
 from puppy.graphics import MAX_IMAGE_DIMENSION, GraphicsManager
+
+PIL = __import__("PIL.Image", fromlist=["Image"])
 
 
 def _b64(data: bytes) -> bytes:
     return base64.b64encode(data)
+
+
+def _real_png(width: int, height: int) -> bytes:
+    # A real PNG, not a synthetic byte string -- exercises Pillow's actual
+    # decoder, not just puppy's control-flow around a mocked one.
+    im = PIL.new("RGBA", (width, height))
+    for y in range(height):
+        for x in range(width):
+            im.putpixel((x, y), (x * 10 % 256, y * 10 % 256, 128, 255))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    return buf.getvalue(), im.tobytes()
 
 
 def test_single_chunk_rgb_transmit_and_display():
@@ -112,7 +129,7 @@ def test_zero_dimensions_rejected():
     assert 1 not in gm.images
 
 
-def test_png_format_out_of_scope_ignored():
+def test_corrupt_png_data_discarded_not_stored():
     gm = GraphicsManager()
     gm.handle_command(
         {"a": "T", "f": "100", "s": "2", "v": "2", "i": "1"}, _b64(b"not a real png"), cursor_row=0, cursor_col=0
@@ -139,4 +156,123 @@ def test_put_action_out_of_scope_ignored_not_crashed():
 def test_malformed_base64_payload_does_not_crash():
     gm = GraphicsManager()
     gm.handle_command({"a": "T", "f": "24", "s": "2", "v": "2", "i": "1"}, b"!!!not base64!!!", cursor_row=0, cursor_col=0)
+    assert 1 not in gm.images
+
+
+def test_png_decodes_real_image_and_overrides_declared_dimensions():
+    # Confirmed against kitty's real inflate_png: the PNG's own header size
+    # wins over whatever s/v the client declared -- deliberately send wrong
+    # ones here to prove puppy doesn't just trust them.
+    png_bytes, raw_rgba = _real_png(3, 2)
+    gm = GraphicsManager()
+    gm.handle_command(
+        {"a": "T", "f": "100", "s": "99", "v": "99", "i": "1"}, _b64(png_bytes), cursor_row=4, cursor_col=2
+    )
+    assert gm.images[1].width == 3
+    assert gm.images[1].height == 2
+    assert gm.images[1].format == 32  # PNG always decodes to RGBA, matching kitty's own libpng normalization
+    assert gm.images[1].data == raw_rgba
+    assert gm.placements[0].row == 4 and gm.placements[0].col == 2
+
+
+def test_png_without_declared_dimensions_works():
+    png_bytes, raw_rgba = _real_png(2, 4)
+    gm = GraphicsManager()
+    gm.handle_command({"a": "T", "f": "100", "i": "1"}, _b64(png_bytes), cursor_row=0, cursor_col=0)
+    assert gm.images[1].width == 2
+    assert gm.images[1].height == 4
+    assert gm.images[1].data == raw_rgba
+
+
+def test_png_chunked_transmission_reassembles():
+    png_bytes, raw_rgba = _real_png(4, 4)
+    mid = len(png_bytes) // 2
+    first, second = png_bytes[:mid], png_bytes[mid:]
+    gm = GraphicsManager()
+    gm.handle_command({"a": "T", "f": "100", "i": "1", "m": "1"}, _b64(first), cursor_row=0, cursor_col=0)
+    assert 1 not in gm.images
+    gm.handle_command({"m": "0"}, _b64(second), cursor_row=0, cursor_col=0)
+    assert gm.images[1].data == raw_rgba
+
+
+def test_compressed_rgba_transmission_round_trips():
+    pixels = bytes(range(16))  # 2x2 RGBA
+    compressed = zlib.compress(pixels)
+    gm = GraphicsManager()
+    gm.handle_command(
+        {"a": "T", "f": "32", "s": "2", "v": "2", "o": "z", "i": "1"}, _b64(compressed), cursor_row=0, cursor_col=0
+    )
+    assert gm.images[1].data == pixels
+    assert gm.images[1].format == 32
+
+
+def test_compressed_png_round_trips():
+    png_bytes, raw_rgba = _real_png(2, 2)
+    compressed = zlib.compress(png_bytes)
+    gm = GraphicsManager()
+    gm.handle_command(
+        {"a": "T", "f": "100", "o": "z", "i": "1"}, _b64(compressed), cursor_row=0, cursor_col=0
+    )
+    assert gm.images[1].data == raw_rgba
+
+
+def test_corrupt_compressed_data_discarded_not_stored():
+    gm = GraphicsManager()
+    gm.handle_command(
+        {"a": "T", "f": "32", "s": "2", "v": "2", "o": "z", "i": "1"},
+        _b64(b"not really zlib data"),
+        cursor_row=0,
+        cursor_col=0,
+    )
+    assert 1 not in gm.images
+
+
+def test_compressed_data_decompressing_to_wrong_size_discarded():
+    # Valid zlib stream, but the decompressed length doesn't match the
+    # declared width*height*bpp -- must be treated the same as a real
+    # short/oversized uncompressed transmission, not stored.
+    wrong_size_pixels = bytes(range(8))  # declares 2x2 RGBA (needs 16 bytes)
+    compressed = zlib.compress(wrong_size_pixels)
+    gm = GraphicsManager()
+    gm.handle_command(
+        {"a": "T", "f": "32", "s": "2", "v": "2", "o": "z", "i": "1"}, _b64(compressed), cursor_row=0, cursor_col=0
+    )
+    assert 1 not in gm.images
+
+
+def test_unknown_compression_value_ignored():
+    gm = GraphicsManager()
+    gm.handle_command(
+        {"a": "T", "f": "24", "s": "2", "v": "2", "o": "bogus", "i": "1"},
+        _b64(bytes(range(12))),
+        cursor_row=0,
+        cursor_col=0,
+    )
+    assert gm.images == {}
+
+
+def test_compressed_payload_exceeding_max_data_sz_is_rejected(monkeypatch):
+    # Real DoS protection for the PNG/compressed path, which has no exact
+    # upfront expected size -- confirmed against kitty's own MAX_DATA_SZ
+    # (graphics.c). Patch it small so the test doesn't need to push 400MB.
+    monkeypatch.setattr(graphics_module, "MAX_DATA_SZ", 8)
+    gm = GraphicsManager()
+    gm.handle_command(
+        {"a": "T", "f": "32", "s": "2", "v": "2", "o": "z", "i": "1"},
+        _b64(b"0123456789"),  # 10 raw bytes > patched 8-byte cap
+        cursor_row=0,
+        cursor_col=0,
+    )
+    assert 1 not in gm.images
+    # loading state cleared, not stuck -- a subsequent well-formed command still works
+    pixels = bytes(range(12))
+    gm.handle_command({"a": "T", "f": "24", "s": "2", "v": "2", "i": "2"}, _b64(pixels), cursor_row=0, cursor_col=0)
+    assert gm.images[2].data == pixels
+
+
+def test_oversized_png_dimensions_rejected(monkeypatch):
+    png_bytes, _ = _real_png(4, 4)
+    monkeypatch.setattr(graphics_module, "MAX_IMAGE_DIMENSION", 3)  # smaller than the real 4x4 PNG above
+    gm = GraphicsManager()
+    gm.handle_command({"a": "T", "f": "100", "i": "1"}, _b64(png_bytes), cursor_row=0, cursor_col=0)
     assert 1 not in gm.images

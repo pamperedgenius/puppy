@@ -74,13 +74,15 @@ found because writing an honest terminfo entry (which has a `bce` capability fla
 forced the question "do we actually do this?" Worth treating protocol/terminfo work
 as a trigger for another verification pass, not just a one-time audit.
 
-## Current status (2026-08-20)
+## Current status (2026-08-22)
 
 **puppy is a real, runnable, typeable-into program with kitty keyboard protocol support
 (including query-response), real bold/underline rendering, a general PTY write-back
-channel, a kitty graphics protocol model layer WITH real GPU rendering of placed
-images, and it's launchable from wofi/any `.desktop`-aware launcher, not just
-`python -m puppy.render.app`.**
+channel, a kitty graphics protocol layer (direct RGB/RGBA **and now real PNG +
+zlib-compressed transmission**) WITH real GPU rendering of placed images —
+**confirmed live for the first time this session**, not just via GPU-readback unit
+tests — and it's launchable from wofi/any `.desktop`-aware launcher, not just
+`python -m puppy.render.app`. 259 tests passing (up from 248).
 
 - `python -m puppy.render.app` (or just typing **`puppy`** — see Launching below) opens
   a live GLFW/wgpu window, spawns a real shell in a real PTY, renders the full grid
@@ -150,75 +152,35 @@ finding "real window, real timing" bugs each live-test pass, which is normal for
 project at this stage but does mean it isn't at daily-driver parity yet — say this
 plainly if asked again, don't oversell it.
 
-**Theming bug — real, confirmed, root cause NOT yet found; here is the full narrowing
-so the next session doesn't repeat this work.** User's screenshot showed a white/pale
-background behind the ascii-art box and the stats panel, while everything outside those
-regions (and the color swatches) showed the correct dark navy. Investigated by layering
-verification from the model outward, each layer independently proven correct before
-moving to the next:
-1. **`Screen` model, using the real captured byte stream**: spawned a real `PtySession`
-   running the user's actual shell (`SHELL=/home/teter/.local/bin/tish` — this machine's
-   default `$SHELL` under a plain bash tool session is `/bin/bash`, NOT `tish`, so any
-   repro must set `SHELL=` explicitly or it silently won't exercise tish's real startup
-   behavior, including its auto-run of `unifetch`), captured the raw bytes to
-   `/tmp/.../tish_raw2.bin` (~5.6KB, confirmed complete — two separate captures at 4s
-   and 8s durations produced byte-identical length). Fed those exact bytes through
-   `Parser`+`Screen`, inspected **every cell** in a printed row (`os`/`host` line, cols
-   48-94, including both actual glyph cells and the space-padding within/after the
-   printed text) — every single one resolves to `bg=None` → theme's `(0, 0, 41)` navy,
-   with zero exceptions. Also grepped both raw captures for `7m`/`27m`/`48;` (reverse
-   video / explicit background SGR codes) — **none exist anywhere in the stream**, so
-   this is not a reverse-video or stray-background-escape bug. Model is clean.
-2. **Full CPU→GPU pipeline, offscreen (no live window)**: built a standalone repro using
-   the *exact* app.py code path (`build_instances`, real `FontRenderer`, real
-   `GlyphAtlas`, real `CellRenderer`, real loaded `midnight2` theme) against an
-   `rendercanvas.offscreen.RenderCanvas` sized to the real grid, fed the same captured
-   byte stream, read back actual GPU pixels. A cell known-blank from the model sampled
-   as exactly `(0, 0, 41, 255)`; the mean color over a sampled grid across the whole
-   frame was `(0.97, 0.92, 42.1)` — overwhelmingly navy, consistent with mostly-background
-   plus a few bright accent pixels. **The offscreen full pipeline is also clean.**
-3. **The live GLFW window itself**: this is where it actually goes wrong, and *only*
-   here. Built a repeatable, low-disruption way to inspect this without pestering the
-   user for more screenshots or repeatedly stealing focus (see the "Live-render
-   debugging technique" note below) — launched `python -m puppy.render.app` in the
-   background with `SHELL=tish` via `timeout`, polled `niri msg --json windows` for a
-   window titled `"puppy"` to appear, then took one `grim` screenshot the moment it did.
-   Two such captures (one under plain `bash` — no `unifetch` autorun, showed a clean
-   navy prompt with nothing wrong — and one under `tish` with `unifetch` running) both
-   confirm: **the bug only appears on cells that were actually printed to** (including
-   trailing/padding space characters within a printed line) — grid regions the model
-   never wrote to at all render with the correct navy background. This cell-content-
-   dependent pattern is the strongest clue so far and rules out anything that would be
-   uniform across the whole surface (a wrong clear color, a wrong surface format, a
-   global uniform-buffer mixup).
-4. **Ruled out as the cause**: reverse video / explicit-bg escape codes (none in the
-   stream, see #1); a global fg/bg swap in `build_instances`'s call site (checked, the
-   `default_fg=theme.fg, default_bg=theme.bg` kwargs are correctly *not* swapped);
-   sRGB/format mismatch between offscreen (`rgba8unorm-srgb`) and live
-   (`bgra8unorm-srgb`) surfaces — both are properly sRGB, and `gpu.format` is correctly
-   threaded into pipeline creation for whichever canvas is used, so wgpu should handle
-   the channel-order difference transparently; a phantom-ink bold-space glyph (tested
-   both bold and non-bold rasterization of `' '` with the real font — both are a true
-   0x0 empty bitmap, nothing to blit).
-5. **Not yet checked (next session, in this order)**: (a) whether a *non-space*, bold
-   glyph's rasterized bitmap has any stray alpha bleeding past its own cell bounds into
-   a neighbor (the whole unifetch stream is wrapped in `\x1b[1m` — bold — almost
-   everywhere, unlike the isolated bold-space test which only checked the empty-glyph
-   case); (b) whether this is specific to the *live, continuously-redrawn* frame loop
-   vs. the offscreen test's one-shot `render()` call — i.e. a `sync_atlas()`/
-   `write_texture` ordering or GPU-queue-synchronization issue that only manifests
-   across multiple real frames, not a single offscreen draw (try looping `render()`
-   several times against the offscreen canvas with atlas mutations between calls,
-   matching the live per-frame `build_instances()` → `render()` pattern, before
-   assuming it needs the *actual* GLFW/live surface to reproduce); (c) whether
-   `CellRenderer.resize()` specifically (as opposed to the fresh `_allocate()` the
-   offscreen test only exercises once at construction) leaves the instance buffer or
-   bind group in a bad state the first time it's *reused* across a resize — the phase-3
-   fix means the live app now gets its correct size before the shell spawns, so
-   `resize()` may not even fire during a normal launch, but worth ruling in/out
-   explicitly since it's still new code exercised only by unit tests so far, not by any
-   of the live-repro passes done this session specifically with print instrumentation
-   inside it.
+**Theming bug — RESOLVED as non-reproducing (2026-08-22), after finishing the two
+untested hypotheses the prior session left open.** Recap: user's screenshot had shown a
+white/pale background behind printed cells (including trailing padding spaces) while
+untouched grid regions stayed correct navy; the `Screen` model and one-shot offscreen
+GPU pipeline had both already been proven clean against the real captured byte stream,
+narrowing it to something live/frame-loop specific. This session closed out the two
+remaining untested hypotheses and found neither reproduces:
+- **(b) multi-frame queue-sync**: fed the *exact* real chunked byte stream (49 real
+  `select()`-sized chunks captured from a live `tish`+`unifetch` PTY session, not a
+  single write) through the exact live per-frame pattern (`parser.feed()` →
+  `build_instances()` → `canvas.request_draw()` → `canvas.draw()`, once per chunk, 49
+  real frames) against an offscreen canvas. Zero white/pale pixels on readback — the
+  offscreen pipeline is clean even under the exact live-matching multi-frame conditions,
+  bold-heavy `unifetch` output included.
+- **(c) `CellRenderer.resize()` reuse**: launched the real live GLFW window twice via the
+  existing grim/niri screenshot technique (see below) — once at initial launch, once
+  after driving real niri resize actions mid-session (`maximize-column`, `set-column-
+  width -25%`, then `+40%`) to force `resize()` to actually fire and reuse its buffers.
+  Both captures pixel-sampled with zero white/pale pixels; dominant colors matched the
+  theme's `(0, 0, 41)` bg / `(159, 182, 205)` fg exactly.
+- **Conclusion**: the bug does not currently reproduce under any of the previously-live-
+  only or previously-untested conditions. Root cause remains genuinely unknown — this
+  could mean it was an artifact of some transient system/GPU-driver state at the time of
+  the original report, or a condition still not hit (sustained real interactive use
+  rather than a passive/scripted launch). Not claiming "definitely fixed" since no code
+  changed here and no root cause was found, but extensive, rigorous, real (not just
+  eyeballed) pixel-level testing across both suspicious scenarios found nothing. If it
+  recurs, use the pixel-sampling method now proven here (grim screenshot → PIL/numpy →
+  count `r>180 and g>180 and b>180` pixels) rather than eyeballing a screenshot.
 
 **Live-render debugging technique (new this session, reusable)**: to inspect what's
 *actually* on screen in the live GLFW window without repeatedly focusing/closing
@@ -823,13 +785,57 @@ with the date when something is confirmed working (not just "code exists").
       `ceil(8/4)=2` cells and no more; placement position is driven by
       `row`/`col`, not always the origin; zero placements is a true no-op.
       Verified live: `timeout 3 python -m puppy.render.app` still starts and
-      runs with no crash. **Not yet confirmed with a real live image** — no
-      one has watched an actual kitty-graphics-emitting program (icat, a
-      hand-crafted printf of a real APC sequence) render inside the live
-      window; the exact-pixel GPU tests prove the render math in isolation,
-      this is a separate, lower-priority live-confirmation step, see Current
-      status.
-- [ ] Kitty graphics: PNG format (`f=100`), compression (`o=z`)
+      runs with no crash. **Confirmed with a real live image 2026-08-22** —
+      see the PNG milestone entry directly below; a hand-crafted APC sequence
+      rendered a real gradient PNG correctly inside the actual live window.
+- [x] **Kitty graphics: PNG format (`f=100`) + zlib compression (`o=z`) — 2026-08-22.**
+      Confirmed against kitty's real `png-reader.c`/`graphics.c` before building:
+      kitty links real libpng and always normalizes decoded output to RGBA8
+      regardless of the PNG's own color type/bit depth (palette, gray, 16-bit, tRNS
+      alpha, etc. all get folded to RGBA8 via `png_set_*` calls in
+      `inflate_png_inner`); the PNG's *own* header width/height unconditionally
+      *override* whatever `s`/`v` the client declared (`load_data->width = d.width`
+      in `inflate_png`) — kitty doesn't even require `s`/`v` for `f=100`, confirmed
+      neither does puppy now. Compression (`o=z`, zlib) is applied *before* PNG
+      decode when both are present (confirmed via `process_image_data`'s real
+      compressed-then-format switch ordering) and is independent of format —
+      `f=24`/`f=32` payloads can be `o=z`-compressed too, decompressed then
+      length-checked against the declared `width*height*bpp` exactly as the
+      uncompressed path already was. Sizing: PNG/compressed loads have no exact
+      expected size upfront (unlike uncompressed direct RGB/RGBA), so accumulation
+      is capped at kitty's own real `MAX_DATA_SZ` (`4u * 100000000u`, confirmed via
+      graphics.c's literal `#define`) instead of an exact match, with the real
+      decompressed/decoded size validated only after the last chunk arrives.
+      PNG decoding itself uses Pillow (`Image.convert("RGBA")`) as the direct
+      Python equivalent of kitty's libpng dependency — matching this project's
+      established pattern of using real, proven libraries for infrastructure
+      (HarfBuzz, FreeType, wgpu-native) rather than hand-rolling a PNG/zlib-chunk
+      parser from scratch; new project dependency, `pyproject.toml` updated.
+      Deliberately out of scope, matching kitty's own optional (not mandatory-decode)
+      extras: ICC colour-profile transforms and embedded-gamma correction (kitty's
+      PNG path additionally pulls in `lcms2` for this; puppy treats all images as
+      already-sRGB, consistent with every other color path in this codebase).
+      `Image.format`/`GraphicsRenderer` needed zero changes — PNG decode always
+      resolves to the existing `format=32` (RGBA) path, so it flows through the
+      already-tested GPU upload/render code unchanged. 15 new tests (10
+      `test_graphics.py`: real-Pillow-generated PNG decode + dimension-override,
+      PNG chunked reassembly, `o=z` round-trip for both RGBA and PNG, corrupt-PNG/
+      corrupt-zlib/wrong-decompressed-size discarding, unknown-compression-value
+      rejection, `MAX_DATA_SZ` cap enforcement via a patched-small constant, PNG
+      oversized-dimension rejection; 1 `test_parser.py` end-to-end through a real
+      APC PNG escape sequence). **Live-confirmed the same session** (see below,
+      first-ever live image render) — not just proven via GPU-readback tests.
+      **Live-confirmed real image render (2026-08-22, first time ever for this
+      project)**: built a real 120x80 gradient PNG (Pillow), base64-encoded it into
+      a real hand-crafted `\x1b_Ga=T,f=100,...;<payload>\x1b\\` APC sequence inside a
+      wrapper shell script used as `$SHELL` (so the real live app spawns it, prints
+      the sequence unprompted, then `exec`s into the real interactive shell) —
+      launched via the existing grim/niri screenshot technique, screenshot showed
+      the gradient rendering correctly, colors accurate, positioned at the cursor
+      origin, composited correctly with the cell grid and theme background. This
+      closes the milestone's last open item ("no one has watched an actual image
+      appear in the live window yet") for direct RGB/RGBA *and* PNG at once, since
+      the same GraphicsRenderer path handles both.
 - [ ] Kitty graphics: `a=p`/`a=d`/`a=q` (put/delete/query), animation (`a=a`/`a=f`)
 - [ ] Kitty graphics: unicode-placeholder image-in-text method
 - [ ] Kitty graphics: z-index layering, image cropping (`src_rect`), scrollback-scroll
@@ -884,7 +890,7 @@ with the date when something is confirmed working (not just "code exists").
 ```
 puppy/
   PROGRESS.md          this file
-  pyproject.toml        now declares glfw/wgpu/rendercanvas/uharfbuzz/freetype-py
+  pyproject.toml        now declares glfw/wgpu/rendercanvas/uharfbuzz/freetype-py/pillow
   .venv/                 gitignored, real dependency install lives here — activate it
   src/puppy/
     __init__.py
@@ -948,46 +954,26 @@ confirmed live** — that is the mandatory first step of the next session, not a
 optional nice-to-have, because it's entirely possible one of the diagnoses was wrong
 or incomplete and there's more to find.
 
-0. **DO THIS FIRST, before any new feature work.** Launch `puppy` (wofi, or
-   `~/.local/bin/puppy` from a terminal) and check, in order:
-   - Does **Mod+Q now close the window**? If not, the `glfw.window_should_close()`
-     fix in `Window.should_close()` (`window.py`) didn't fully address it — check
-     whether niri is even sending a close request to this specific window at all
-     (e.g. `niri msg windows` while puppy is focused, or check if Mod+Q is scoped to
-     the wrong app-id/window somehow) rather than re-guessing at the GLFW layer,
-     since that layer's logic is now fairly well understood and tested against the
-     raw GLFW flag.
-   - Does the **font/grid now look correctly sized** (not stretched/blown up), and is
-     it **themed** (midnight2's dark-navy palette, not white-on-black)? If the size
-     is still wrong, check whether `on_resize` (`app.py`) is actually firing at all
-     — add a temporary `print(width, height)` in it, since GLFW's Wayland backend
-     could in principle deliver framebuffer-size events differently than assumed
-     (this was reasoned from source, not watched happen live). If it's sized right
-     but *not* themed, check `puppy.render.theme.load_theme()`'s return value at
-     runtime — the parsing itself has 6 passing unit tests against fixtures, but
-     wiring bugs (e.g. an exception during `theme.ansi.items()` iteration silently
-     swallowed somewhere) wouldn't be caught by those.
-   - Does it still feel **very slow to open**? If it feels dramatically slower than
-     the ~1.1s measured this session, something not captured by that timing pass is
-     going on (interactive shell RC-file cost was flagged as unverified — start
-     there) — if it roughly matches ~1-1.5s, that's the already-diagnosed wgpu/shader
-     bring-up cost, not a new bug, see Current status for the measured breakdown.
-   - Separately: get a **real image** to render (e.g. `kitten icat`/`chafa
-     --format=kitty` if installed, or a hand-crafted `printf` of a real
-     `\x1b_Ga=T,f=24,s=<w>,v=<h>,i=1;<base64 RGB bytes>\x1b\\`) — the GPU-readback
-     tests prove the render math is exactly correct in isolation, but no one has
-     watched an actual image appear in the live window yet.
-1. **Kitty graphics: next real protocol milestone — pick one.** All deliberately out
-   of v1 scope so far, each independent, see the `[ ]` Milestones entries above for
-   the exact key/action list each needs:
-   - `f=100` (PNG) + `o=z` (compression) — the two together, since real-world tools
-     (icat, chafa, etc.) send PNG far more often than raw RGB/RGBA. Needs a PNG
-     decoder (check what's already a dependency — Pillow isn't currently one, would
-     be a new addition — vs. writing a minimal PNG-chunk parser by hand) and zlib
-     (stdlib `zlib.decompress`, no new dependency) for `o=z`.
+**2026-08-22 session recap (so the next session doesn't redo this work)**: item 0 below
+(the mandatory live-confirmation pass) is now done — Mod+Q, sizing, and theming were all
+live-checked via the grim/niri screenshot technique and look correct (theming's prior
+white-background report specifically does not reproduce, see Current status for the full
+non-repro writeup; treat as "clean for now," not "provably fixed," since no root cause
+was ever found). PNG (`f=100`) + `o=z` compression are now implemented, tested, and
+live-confirmed with a real rendered image for the first time ever. Launch-speed
+(~1.1s, wgpu bring-up dominated) was not re-measured this session, no new information.
+
+0. ~~DO THIS FIRST~~ — **done 2026-08-22**, see the recap above and Current status for
+   detail. Still open from the original checklist: whether launch feels *dramatically*
+   slower than the measured ~1.1s in real sustained use (only short `timeout`-bounded
+   launches have been tried so far, not a long real session) — worth a passing check
+   next time puppy is used for actual work, not a dedicated pass on its own.
+1. **Kitty graphics: next real protocol milestone — pick one.** Each independent, see
+   the `[ ]` Milestones entries above for the exact key/action list each needs:
    - `a=p`/`a=d`/`a=q` (put an already-transmitted image at a new position / delete /
      query without displaying) — smaller, self-contained additions to
-     `GraphicsManager.handle_command`'s action dispatch.
+     `GraphicsManager.handle_command`'s action dispatch. Probably the next one to reach
+     for, since it's the smallest self-contained unit of the three.
    - z-index layering — currently images always draw on top of everything in
      placement order; real programs (e.g. anything drawing a background image) rely
      on negative z-index drawing *below* the cell grid, which needs `GraphicsRenderer`
@@ -996,6 +982,8 @@ or incomplete and there's more to find.
      `GraphicsManager` addition. Check kitty's real z-index tiers (below/negative/
      positive, confirmed present in `grman_update_layers`, not yet re-read in detail)
      before designing this one.
+   - Sixel graphics (fallback/parity with non-kitty terminals) — a materially different
+     protocol from kitty's own, bigger and more self-contained than the two above.
 2. Separately, whenever there's a spare cycle, unrelated to graphics: live-test
    `TERM=puppy python -m puppy` (the *text* pass-through harness, `__main__.py`) in a
    real terminal window (a real ncurses/vim session using the terminfo entry, not just

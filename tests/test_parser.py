@@ -277,6 +277,22 @@ def test_apc_graphics_command_terminated_by_st_reaches_screen():
     assert screen.dump_text().splitlines()[0] == "ok"
 
 
+def test_apc_png_graphics_command_reaches_screen():
+    import base64
+    import io
+
+    PILImage = __import__("PIL.Image", fromlist=["Image"])
+    im = PILImage.new("RGBA", (2, 2), (10, 20, 30, 255))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    payload = base64.b64encode(buf.getvalue())
+    screen = _run(b"\x1b_Ga=T,f=100,i=7;" + payload + b"\x1b\\ok")
+    assert screen.graphics.images[7].width == 2
+    assert screen.graphics.images[7].height == 2
+    assert screen.graphics.images[7].data == im.tobytes()
+    assert screen.dump_text().splitlines()[0] == "ok"
+
+
 def test_apc_non_graphics_payload_is_ignored_not_crashed():
     screen = _run(b"\x1b_not a graphics command\x1b\\ok")
     assert screen.graphics.images == {}
