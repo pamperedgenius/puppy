@@ -935,6 +935,40 @@ with the date when something is confirmed working (not just "code exists").
       any new feature work. See Current status for the full per-symptom writeup;
       this entry will stay in Milestones as the permanent record after Current
       status gets replaced by a future update.
+- [x] **Second real live user bug report, acted on same session (2026-08-24).** User
+      compared puppy directly against xfce4-terminal/OdyTTY, flagged 4 things. Full
+      diagnosis + fixes in the 2026-08-24 Current status entry above and the Next
+      steps recap (kept there rather than duplicated here) — summary: (1) DA1
+      (`CSI c`)/DA2 (`CSI > c`) device-attribute queries were never answered at all,
+      causing a real ~10s fish/tish startup hang + degraded-mode warning, fixed via
+      `Screen.report_primary/secondary_device_attributes()` + a new `>`-prefix branch
+      in `Parser`; (2) no blur, root-caused to puppy's window never setting a Wayland
+      app-id so RengeOS's existing per-window blur system had nothing to match,
+      fixed via `glfw.window_hint_string(glfw.WAYLAND_APP_ID, "puppy")` in
+      `window.py` (real gotcha: has to be set *after* calling `glfw.init()` ourselves
+      first, since `rendercanvas.glfw`'s own `glfw.init()` call resets hints on a
+      real first init); (3) cat ascii-art body reading as solid black, partially
+      addressed by switching bold rendering to a real bold `.ttf` face (`fc-match
+      "monospace:bold"`) instead of relying only on synthetic
+      `FT_GlyphSlot_Embolden` — real, tested, measured improvement, but a rigorous
+      controlled A/B (identical byte stream, real GPU readback, only font config
+      changed) showed it's a small (~2%) contributor; the dominant cause is the
+      active theme's own `unifetch-colors.conf` hardcoding literal `#000000` for
+      part of the art, confirmed near-invisible against this theme in xfce4-terminal
+      too (a real cross-terminal pixel-sampled comparison, not assumed) — that's a
+      RengeOS theme-file fix, out of this repo's scope, flagged not actioned; (4)
+      launch speed not re-investigated, no new information. 14 new tests (6
+      `test_render_font.py` real-bold-face tests, 3 `test_screen.py` DA1/DA2, 5
+      `test_parser.py` DA1/DA2 end-to-end through real escape bytes), full suite
+      green (273 passed). All 3 real fixes live-confirmed via the grim/niri
+      screenshot technique this same session (DA1: clean prompt past the old 10s
+      cutoff; blur: `niri msg windows` reports `app_id: "puppy"`; bold: real bold
+      face verified loaded and producing measurably less ink than synthetic).
+      **Open question for the next session, not yet answered**: whether to shift
+      priority to daily-driver basics that are currently missing entirely (no
+      visible text cursor, no text selection, no scrollback UI/mouse-wheel-into-
+      history) rather than continuing kitty-graphics-protocol completeness — see
+      Next steps below, ask the user rather than picking unilaterally.
 
 ## File map
 
@@ -999,43 +1033,75 @@ dependencies live there, not in system Python. `pip install -e .` again if the v
 is ever recreated (it's gitignored).
 
 **Nothing is mid-flight; there is no unfinished code to pick back up.** Everything
-through the 2026-08-20 bug-fix pass (Mod+Q close, resize/theming) is real, committed,
-and test-covered. But **none of this session's 3 code fixes have been visually
-confirmed live** — that is the mandatory first step of the next session, not an
-optional nice-to-have, because it's entirely possible one of the diagnoses was wrong
-or incomplete and there's more to find.
+through the 2026-08-24 fix pass (DA1/DA2, real bold face, blur app-id) is real,
+committed, pushed, test-covered (273 passing), and live-confirmed.
 
-**2026-08-22 session recap (so the next session doesn't redo this work)**: item 0 below
-(the mandatory live-confirmation pass) is now done — Mod+Q, sizing, and theming were all
-live-checked via the grim/niri screenshot technique and look correct (theming's prior
-white-background report specifically does not reproduce, see Current status for the full
-non-repro writeup; treat as "clean for now," not "provably fixed," since no root cause
-was ever found). PNG (`f=100`) + `o=z` compression are now implemented, tested, and
-live-confirmed with a real rendered image for the first time ever. Launch-speed
-(~1.1s, wgpu bring-up dominated) was not re-measured this session, no new information.
+### 2026-08-24 session recap (second live user bug-report pass)
 
-0. ~~DO THIS FIRST~~ — **done 2026-08-22**, see the recap above and Current status for
-   detail. Still open from the original checklist: whether launch feels *dramatically*
-   slower than the measured ~1.1s in real sustained use (only short `timeout`-bounded
-   launches have been tried so far, not a long real session) — worth a passing check
-   next time puppy is used for actual work, not a dedicated pass on its own.
-1. **Kitty graphics: next real protocol milestone — pick one.** Each independent, see
-   the `[ ]` Milestones entries above for the exact key/action list each needs:
-   - `a=p`/`a=d`/`a=q` (put an already-transmitted image at a new position / delete /
-     query without displaying) — smaller, self-contained additions to
-     `GraphicsManager.handle_command`'s action dispatch. Probably the next one to reach
-     for, since it's the smallest self-contained unit of the three.
-   - z-index layering — currently images always draw on top of everything in
-     placement order; real programs (e.g. anything drawing a background image) rely
-     on negative z-index drawing *below* the cell grid, which needs `GraphicsRenderer`
-     to interleave with (or run before) `CellRenderer` rather than always running
-     after it — a real architectural change to `app.py`'s `draw_frame()`, not just a
-     `GraphicsManager` addition. Check kitty's real z-index tiers (below/negative/
-     positive, confirmed present in `grman_update_layers`, not yet re-read in detail)
-     before designing this one.
-   - Sixel graphics (fallback/parity with non-kitty terminals) — a materially different
-     protocol from kitty's own, bigger and more self-contained than the two above.
-2. Separately, whenever there's a spare cycle, unrelated to graphics: live-test
+User compared puppy directly against xfce4-terminal/OdyTTY and flagged 4 things.
+3 were real puppy bugs, now fixed and live-confirmed (see the Current status entry
+dated 2026-08-24 for full detail, and the Milestones entries below):
+- **Fish/tish DA1 10s-timeout warning** — puppy never answered `CSI c`/`CSI > c` at
+  all. Fixed via `Screen.report_primary/secondary_device_attributes()` + a new `>`
+  prefix in `Parser`.
+- **No blur (unlike OdyTTY)** — puppy's window had no Wayland app-id, so RengeOS's
+  existing per-window blur system (`Mod+Ctrl+A`, app-id-keyed niri window-rules) had
+  nothing to target. Fixed in `window.py` — real gotcha: `rendercanvas.glfw`'s
+  `glfw.init()` resets hints on first real init, so the app-id hint has to be set
+  after calling `glfw.init()` ourselves first, not just before constructing
+  `RenderCanvas`.
+- **Cat ascii-art body reads as solid black, clashes with the theme** — bold now uses
+  a real bold `.ttf` face (`fc-match "monospace:bold"`) instead of relying only on
+  synthetic `FT_GlyphSlot_Embolden`. **This is a real, tested, worthwhile improvement,
+  but it is NOT the main fix for what the user is seeing** — a rigorous controlled A/B
+  (identical byte stream, real GPU pixel readback, only the font config changed)
+  showed it closes only ~2% of the density gap. The actual dominant cause: the active
+  theme's own `~/.config/theme-switcher/themes/midnight2/unifetch-colors.conf`
+  hardcodes literal `#000000` (real 24-bit truecolor) for part of the cat outline,
+  which renders near-invisible against this theme's `#000029` background in *any*
+  spec-compliant truecolor terminal — confirmed by capturing and pixel-sampling
+  xfce4-terminal rendering the exact same content, not assumed. **This is a RengeOS
+  theme-file fix, not a puppy code fix** — if the user wants it addressed, it means
+  editing that theme's `unifetch-colors.conf` (or `apply-unifetch-theme.py`'s
+  generation logic if it's wrong for every theme, not just this one), a different
+  repo/scope than puppy itself. Not done this session — flagged, not actioned,
+  since it's outside this project.
+- **Launch still feels slow** — not re-investigated this pass, no new information
+  beyond the existing ~1.1s/wgpu-bring-up-dominated measurement from 2026-08-20.
+
+**The real open question for the next session, not yet answered by the user**: is
+puppy's current scope (kitty keyboard protocol, kitty graphics protocol direct+PNG,
+baseline VT100/xterm) "enough" for now, or should the next real priority shift to
+*daily-driver basics that are currently missing entirely*, which is what actually
+separates puppy from being a complete terminal like kitty/OdyTTY rather than any
+single protocol gap:
+- **No visible text cursor at all.** `Screen.cursor_row`/`cursor_col` are tracked
+  (needed for correctly positioning writes) but `build_instances()`/`CellRenderer`
+  never render a cursor block/bar/underline at that position — confirmed by reading
+  the code, not assumed. This is probably the single most conspicuous "this isn't a
+  real terminal yet" gap for anyone actually trying to use it.
+- **No text selection** (click-drag to select, copy). The only "selection" in the
+  codebase is OSC 52 clipboard-buffer naming (`c`/`p`/`s`), unrelated to visual
+  text-selection UI — confirmed by reading the code, not assumed.
+- **No scrollback UI.** `Screen` stores scrollback (`deque(maxlen=2000)`) but
+  nothing lets a user actually view it — `input_state.py`'s `on_scroll` only forwards
+  wheel events to the child program via the mouse protocol, it doesn't move puppy's
+  own viewport into history when no program has claimed mouse reporting. Confirmed by
+  reading the code, not assumed.
+- Also still missing entirely, lower priority than the three above: tabs/splits, any
+  config file (font size/theme/keybinds are all still hardcoded in `app.py`), Sixel,
+  most of kitty's graphics extras (`a=p`/`a=d`/`a=q`, z-index, animation), ligatures/
+  complex-script shaping.
+
+Ask the user which of these to prioritize before picking a direction — don't just
+pick one unilaterally, this is exactly the kind of scope call that should be
+confirmed first, especially given a stated concern this session about spending
+effort well. If they'd rather keep extending kitty-graphics-protocol completeness
+instead (the previous session's direction), that's still a valid, real, independent
+option — see the `[ ]` Milestones entries below for `a=p`/`a=d`/`a=q`, z-index
+layering, and Sixel, each with the exact key/action list needed.
+
+Separately, whenever there's a spare cycle, unrelated to any of the above: live-test
    `TERM=puppy python -m puppy` (the *text* pass-through harness, `__main__.py`) in a
    real terminal window (a real ncurses/vim session using the terminfo entry, not just
    `curses.setupterm()` accepting it headlessly) — still pending since it was first
