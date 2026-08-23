@@ -122,6 +122,24 @@ class Screen:
         confirmed against kitty's real screen_report_key_encoding_flags."""
         self._write_back(f"\x1b[?{self.key_encoding_flags}u".encode("ascii"))
 
+    def report_primary_device_attributes(self) -> None:
+        """CSI c / CSI 0 c (DA1): responds CSI ? 62 ; c -- confirmed against
+        kitty's real report_device_attributes/da1 (window.py): `?62` is the
+        VT220-class code kitty always reports; the real, conditional `;52`
+        (clipboard-write support) is only appended when a config option most
+        terminals leave off by default, so it's omitted here too. Without any
+        response at all, a real client (e.g. fish, confirmed live on this
+        system) blocks waiting for it and eventually times out with a
+        degraded-mode warning -- this exists specifically to fix that."""
+        self._write_back(b"\x1b[?62;c")
+
+    def report_secondary_device_attributes(self) -> None:
+        """CSI > c / CSI > 0 c (DA2): responds CSI > <type> ; <version> ; 0 c,
+        same shape as kitty's real report_device_attributes/da2 (`>1;<major
+        version>;<minor version>c`) but with puppy's own identity/version --
+        not attempting to impersonate kitty's version number."""
+        self._write_back(b"\x1b[>1;0;1c")
+
     def set_private_mode(self, mode: int, enabled: bool) -> None:
         if enabled:
             self.private_modes.add(mode)

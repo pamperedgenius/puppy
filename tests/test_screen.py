@@ -487,3 +487,23 @@ def test_report_key_encoding_flags_reflects_zero_by_default():
     s = Screen(write_back=writes.append)
     s.report_key_encoding_flags()
     assert writes == [b"\x1b[?0u"]
+
+
+def test_report_primary_device_attributes_writes_correct_response():
+    writes = []
+    s = Screen(write_back=writes.append)
+    s.report_primary_device_attributes()
+    assert writes == [b"\x1b[?62;c"]
+
+
+def test_report_secondary_device_attributes_writes_correct_response():
+    writes = []
+    s = Screen(write_back=writes.append)
+    s.report_secondary_device_attributes()
+    assert writes == [b"\x1b[>1;0;1c"]
+
+
+def test_device_attribute_reports_default_to_noop_when_no_write_back_given():
+    s = Screen()
+    s.report_primary_device_attributes()  # must not raise
+    s.report_secondary_device_attributes()  # must not raise

@@ -61,6 +61,21 @@ def find_monospace_font() -> str:
     return path
 
 
+def find_bold_monospace_font() -> str | None:
+    """Best-effort: a distinct real bold face, matching how xfce4-terminal/
+    Pango render bold rather than FreeType's synthetic embolden alone (see
+    font.py's module docstring for why this matters -- a real, measured pixel-
+    density difference, not just cosmetic preference). Returns None (falls
+    back to synthetic embolden) if fc-match is missing or fails; FontRenderer
+    itself also falls back if the resolved path is identical to the regular
+    face (fontconfig's own signal that no true bold weight exists)."""
+    if not shutil.which("fc-match"):
+        return None
+    result = subprocess.run(["fc-match", "-f", "%{file}", "monospace:bold"], capture_output=True, text=True)
+    path = result.stdout.strip()
+    return path or None
+
+
 def build_instances(
     screen: Screen, font: FontRenderer, atlas: GlyphAtlas, default_fg: tuple[int, int, int] = DEFAULT_FG, default_bg: tuple[int, int, int] = DEFAULT_BG
 ) -> np.ndarray:
@@ -68,7 +83,7 @@ def build_instances(
     idx = 0
     for row_idx, row in enumerate(screen.grid):
         for col_idx, cell in enumerate(row):
-            glyph_id = font.glyph_id_for_char(cell.char)
+            glyph_id = font.glyph_id_for_char(cell.char, bold=cell.bold)
             bitmap = font.rasterize(glyph_id, bold=cell.bold)
             slot = atlas.get_or_add((glyph_id, cell.bold), bitmap)
 
@@ -87,7 +102,8 @@ def run(rows: int = 24, cols: int = 80, pixel_size: int = 16) -> None:
     theme = load_theme()
 
     font_path = find_monospace_font()
-    font = FontRenderer(font_path, pixel_size)
+    bold_font_path = find_bold_monospace_font()
+    font = FontRenderer(font_path, pixel_size, bold_font_path=bold_font_path)
     atlas = GlyphAtlas(font.cell_width, font.cell_height, font.ascender)
     window = Window(rows, cols, font.cell_width, font.cell_height, title="puppy")
 

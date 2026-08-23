@@ -74,6 +74,57 @@ found because writing an honest terminfo entry (which has a `bce` capability fla
 forced the question "do we actually do this?" Worth treating protocol/terminfo work
 as a trigger for another verification pass, not just a one-time audit.
 
+## Current status (2026-08-24)
+
+**Second live user bug report this session, all 3 real issues fixed, 273 tests
+passing (up from 259).** User compared puppy directly against xfce4-terminal/OdyTTY
+and flagged: cat-art body too solid-black, no blur (unlike OdyTTY), a fish "Primary
+Device Attribute" 10s-timeout warning, and launch still feeling slow.
+- **DA1/DA2 device attribute queries** (real bug, not cosmetic): puppy never answered
+  `CSI c`/`CSI > c` at all, so fish/tish blocked ~10s on shell startup and printed a
+  degraded-mode warning. `Screen.report_primary/secondary_device_attributes()` +
+  `Parser` now track a `>` prefix (new, parallel to the existing `?`/`=` tracking) and
+  respond `CSI ?62;c` / `CSI >1;0;1c` via the existing write_back channel (confirmed
+  format against kitty's real `report_device_attributes`/`da1`/`da2`). Live-confirmed:
+  a 15s run now reaches a clean prompt with no warning, past the old 10s cutoff.
+- **Real bold font face**, replacing synthetic-embolden-only: `FontRenderer` now loads
+  a genuine bold `.ttf` (resolved via `fc-match "monospace:bold"`, same fontconfig
+  mechanism as the regular face) when the system has a distinct one, falling back to
+  the old `FT_GlyphSlot_Embolden` path otherwise (still real, still tested). Verified
+  before trusting: regular/bold DejaVu Markup Nerd Font faces report identical hinted
+  cell metrics and matching cmap indices for the punctuation set unifetch's art uses.
+  **Honest caveat**: a rigorous controlled A/B (identical byte stream, real GPU
+  readback, only the font config changed) showed this closes only a small part
+  (~2% fewer pure-black pixels) of the visual gap against xfce4-terminal — an initial
+  cross-terminal screenshot comparison suggesting a much bigger (~5x) gap turned out to
+  be confounded by different window/cell sizes between the two captures, not a clean
+  signal. The bulk of "doesn't fit well against the background" is the *content*: the
+  active theme's own `unifetch-colors.conf` hardcodes literal `#000000` (real 24-bit
+  truecolor, `\x1b[38;2;0;0;0m`) for part of the cat outline, which is genuinely
+  near-invisible against this theme's `#000029` background in *any* spec-compliant
+  truecolor terminal, puppy included — not something to "fix" by deviating from the
+  color a program actually requested. A real fix belongs in the theme's own
+  `unifetch-colors.conf` (RengeOS/theme-switcher scope, not this repo), not here.
+- **Blur/transparency now targetable**: puppy's window had no Wayland app-id at all
+  (`niri msg windows` showed `app_id: null`), so RengeOS's existing per-window
+  blur/opacity system (`window-effect-toggle.py`, app-id-keyed niri window-rules,
+  `Mod+Ctrl+A`) had nothing to match against — this was never a puppy rendering gap;
+  niri applies blur as a compositor-level effect on the whole surface regardless of
+  what the app itself renders. Fixed in `Window.__init__` (`window.py`) via
+  `glfw.window_hint_string(glfw.WAYLAND_APP_ID, "puppy")` — non-obvious gotcha found
+  and worked around: `rendercanvas.glfw.GlfwRenderCanvas.__init__` calls `glfw.init()`
+  as its first step, which resets window hints on a real first init, silently wiping
+  out a hint set before constructing `RenderCanvas`; calling `glfw.init()` ourselves
+  first (real GLFW semantics: a second `glfwInit()` while already initialized is a
+  no-op, confirmed against GLFW's own docs, not assumed) makes hints set right after
+  survive into RenderCanvas's own (now second, no-op) `glfw.init()` call. Live-
+  confirmed: `niri msg windows` now reports `app_id: "puppy"`.
+- **Launch speed**: not re-investigated this pass — no new information beyond the
+  2026-08-20 measurement (~1.1s, ~75% wgpu adapter/shader bring-up). Flagging honestly
+  rather than guessing: the next real lever would be wgpu-native pipeline caching
+  across process launches (unexplored, see the 2026-08-20 entry below) or restructuring
+  GPU init order — both bigger, riskier changes not attempted reactively mid-session.
+
 ## Current status (2026-08-22)
 
 **puppy is a real, runnable, typeable-into program with kitty keyboard protocol support

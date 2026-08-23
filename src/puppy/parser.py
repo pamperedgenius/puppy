@@ -70,6 +70,9 @@ class Parser:
         # (push/pop a flags stack) are real, documented gaps -- not implemented,
         # see puppy.kitty_keyboard's module docstring.
         self._equals_prefix = False
+        # CSI > c (DA2, secondary device attributes) -- a distinct prefix from
+        # '?'/'=', same '[' byte 0x3E not otherwise used as a param/separator.
+        self._gt_prefix = False
         self._utf8_bytes = bytearray()
         self._osc_pending_esc = False
         self._osc_buf = bytearray()
@@ -135,6 +138,7 @@ class Parser:
             self._is_subparam = [False]
             self._private = False
             self._equals_prefix = False
+            self._gt_prefix = False
             return
         if ch == "]":
             self.state = self.OSC
@@ -169,6 +173,9 @@ class Parser:
             return
         if ch == "=" and self._params == [""]:
             self._equals_prefix = True
+            return
+        if ch == ">" and self._params == [""]:
+            self._gt_prefix = True
             return
         if ch.isdigit():
             if len(self._params[-1]) < self._MAX_PARAM_LEN:
@@ -219,6 +226,10 @@ class Parser:
                 return
             self._dispatch_private_mode(final)
             return
+        if self._gt_prefix:
+            if final == "c":
+                self.sink.report_secondary_device_attributes()
+            return
         if final == "A":
             self.sink.cursor_up(self._param(0, 1))
         elif final == "B":
@@ -243,6 +254,8 @@ class Parser:
             self.sink.insert_chars(self._param(0, 1))
         elif final == "P":
             self.sink.delete_chars(self._param(0, 1))
+        elif final == "c":
+            self.sink.report_primary_device_attributes()
         elif final == "m":
             params = []
             for p in self._params:

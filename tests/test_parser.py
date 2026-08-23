@@ -334,3 +334,39 @@ def test_csi_question_u_with_no_flags_set_reports_zero():
     parser = Parser(screen)
     parser.feed(b"\x1b[?u")
     assert writes == [b"\x1b[?0u"]
+
+
+def test_csi_c_da1_query_writes_response_via_write_back():
+    # Real bug this fixes: a client (confirmed live -- fish/tish) sending a
+    # bare CSI c and getting no response at all blocks for its full timeout.
+    writes = []
+    screen = Screen(rows=5, cols=20, write_back=writes.append)
+    parser = Parser(screen)
+    parser.feed(b"\x1b[c")
+    assert writes == [b"\x1b[?62;c"]
+
+
+def test_csi_0_c_da1_query_writes_response_via_write_back():
+    writes = []
+    screen = Screen(rows=5, cols=20, write_back=writes.append)
+    parser = Parser(screen)
+    parser.feed(b"\x1b[0c")
+    assert writes == [b"\x1b[?62;c"]
+
+
+def test_csi_gt_c_da2_query_writes_response_via_write_back():
+    writes = []
+    screen = Screen(rows=5, cols=20, write_back=writes.append)
+    parser = Parser(screen)
+    parser.feed(b"\x1b[>c")
+    assert writes == [b"\x1b[>1;0;1c"]
+
+
+def test_da1_query_does_not_disturb_normal_parsing():
+    screen = _run(b"\x1b[c" + b"ok")
+    assert screen.dump_text().splitlines()[0] == "ok"
+
+
+def test_da2_query_does_not_disturb_normal_parsing():
+    screen = _run(b"\x1b[>c" + b"ok")
+    assert screen.dump_text().splitlines()[0] == "ok"

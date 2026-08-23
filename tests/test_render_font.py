@@ -24,7 +24,18 @@ def _find_monospace_font() -> str | None:
     return path or None
 
 
+def _find_bold_monospace_font() -> str | None:
+    if not shutil.which("fc-match"):
+        return None
+    result = subprocess.run(
+        ["fc-match", "-f", "%{file}", "monospace:bold"], capture_output=True, text=True
+    )
+    path = result.stdout.strip()
+    return path or None
+
+
 _FONT_PATH = _find_monospace_font()
+_BOLD_FONT_PATH = _find_bold_monospace_font()
 pytestmark = pytest.mark.skipif(_FONT_PATH is None, reason="no monospace font found via fontconfig")
 
 
@@ -122,3 +133,66 @@ def test_underline_metrics_are_sane(font):
     # underline sits below the baseline, above the very bottom of the cell,
     # and within the cell bounds
     assert font.ascender < font.underline_y < font.cell_height
+
+
+@pytest.mark.skipif(_BOLD_FONT_PATH is None or _BOLD_FONT_PATH == _FONT_PATH, reason="no distinct bold face found")
+def test_real_bold_face_is_used_when_available():
+    font = FontRenderer(_FONT_PATH, pixel_size=16, bold_font_path=_BOLD_FONT_PATH)
+    assert font._bold_ft_face is not None
+    assert font._bold_hb_font is not None
+
+
+@pytest.mark.skipif(_BOLD_FONT_PATH is None or _BOLD_FONT_PATH == _FONT_PATH, reason="no distinct bold face found")
+def test_real_bold_face_produces_real_ink_not_a_noop():
+    font = FontRenderer(_FONT_PATH, pixel_size=16, bold_font_path=_BOLD_FONT_PATH)
+    regular = font.rasterize_char("M", bold=False)
+    bold = font.rasterize_char("M", bold=True)
+    assert sum(bold.pixels) > 0
+    assert bold.pixels != regular.pixels
+
+
+@pytest.mark.skipif(_BOLD_FONT_PATH is None or _BOLD_FONT_PATH == _FONT_PATH, reason="no distinct bold face found")
+def test_real_bold_face_produces_less_ink_than_synthetic_embolden():
+    # The actual motivating fix (2026-08-24): synthetic FT_GlyphSlot_Embolden
+    # over-thickens strokes compared to a real bold face's own design --
+    # confirmed via a real live pixel-density comparison against
+    # xfce4-terminal (~5x more pure-black pixel density for identical bold
+    # ascii-art content). A real bold face should produce meaningfully less
+    # ink than blindly emboldening the regular glyph.
+    real_bold_font = FontRenderer(_FONT_PATH, pixel_size=16, bold_font_path=_BOLD_FONT_PATH)
+    synthetic_bold_font = FontRenderer(_FONT_PATH, pixel_size=16)  # no bold_font_path -- forces the fallback
+    real_bold = real_bold_font.rasterize_char("M", bold=True)
+    synthetic_bold = synthetic_bold_font.rasterize_char("M", bold=True)
+    assert sum(real_bold.pixels) < sum(synthetic_bold.pixels)
+
+
+def test_bold_falls_back_to_synthetic_embolden_when_bold_path_equals_regular_path():
+    # A real, if imperfect, fontconfig signal that no true bold weight is
+    # registered for the family -- must degrade to the still-tested synthetic
+    # path, not silently produce non-bold output.
+    font = FontRenderer(_FONT_PATH, pixel_size=16, bold_font_path=_FONT_PATH)
+    assert font._bold_ft_face is None
+    regular = font.rasterize_char("M", bold=False)
+    bold = font.rasterize_char("M", bold=True)
+    assert sum(bold.pixels) > sum(regular.pixels)
+
+
+def test_bold_falls_back_to_synthetic_embolden_when_no_bold_path_given(font):
+    assert font._bold_ft_face is None
+    regular = font.rasterize_char("M", bold=False)
+    bold = font.rasterize_char("M", bold=True)
+    assert sum(bold.pixels) > sum(regular.pixels)
+
+
+@pytest.mark.skipif(_BOLD_FONT_PATH is None or _BOLD_FONT_PATH == _FONT_PATH, reason="no distinct bold face found")
+def test_glyph_id_for_char_differs_by_bold_when_real_bold_face_present():
+    # glyph_id_for_char must shape against the correct face per bold state --
+    # a bold glyph id read back into the wrong face's rasterize() call would
+    # render garbage or the wrong character entirely.
+    font = FontRenderer(_FONT_PATH, pixel_size=16, bold_font_path=_BOLD_FONT_PATH)
+    regular_id = font.glyph_id_for_char("A", bold=False)
+    bold_id = font.glyph_id_for_char("A", bold=True)
+    # cached separately regardless of whether the ids happen to collide
+    assert len(font._char_to_glyph_id) == 2
+    assert font._char_to_glyph_id[("A", False)] == regular_id
+    assert font._char_to_glyph_id[("A", True)] == bold_id

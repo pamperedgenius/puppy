@@ -27,6 +27,26 @@ class Window:
     def __init__(self, rows: int, cols: int, cell_width: int, cell_height: int, title: str = "puppy") -> None:
         width = max(1, cols * cell_width)
         height = max(1, rows * cell_height)
+        # Real gap fixed here (2026-08-24): puppy's window had no Wayland
+        # app-id at all (confirmed live via `niri msg windows`: app_id was
+        # null), so niri's own per-window blur/transparency system (window-
+        # rules keyed on app-id, ~/.config/niri/scripts/window-effect-
+        # toggle.py) couldn't target it -- not a rendering gap in puppy, niri
+        # applies blur as a compositor-level window-rule effect regardless of
+        # what the app itself renders, it just needs a stable app-id to match
+        # on. `rendercanvas.glfw.GlfwRenderCanvas.__init__` calls glfw.init()
+        # as its very first step, which resets window hints on the *first*
+        # real init -- confirmed via its own source (rendercanvas/glfw.py's
+        # enable_glfw()) -- so a hint set before constructing RenderCanvas
+        # would be silently wiped. Calling glfw.init() here ourselves first
+        # makes that the real first init (hints reset to defaults, harmless
+        # since none are set yet); GLFW's real semantics (confirmed against
+        # the GLFW docs, not assumed) are that a *second* glfwInit() call
+        # while already initialized is a no-op that does not reset hints, so
+        # the app-id hint set right after survives into RenderCanvas's own
+        # (now-second, no-op) glfw.init() call and its window creation.
+        glfw.init()
+        glfw.window_hint_string(glfw.WAYLAND_APP_ID, "puppy")
         self.canvas = RenderCanvas(size=(width, height), title=title)
         self.gpu = GpuContext.create(self.canvas)
 
