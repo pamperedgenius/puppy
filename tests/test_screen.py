@@ -315,6 +315,46 @@ def test_private_mode_reset_of_unset_mode_is_a_noop():
     assert 9999 not in s.private_modes
 
 
+def test_cursor_defaults_to_visible_blinking_block():
+    s = Screen()
+    assert s.cursor_visible is True
+    assert s.cursor_shape == "block"
+    assert s.cursor_blink is True
+
+
+def test_set_cursor_visible_toggles_dectcem():
+    s = Screen()
+    s.set_cursor_visible(False)
+    assert s.cursor_visible is False
+    s.set_cursor_visible(True)
+    assert s.cursor_visible is True
+
+
+def test_set_cursor_shape_decscusr_modes():
+    # DECSCUSR: odd modes blink, even modes are steady (confirmed against
+    # kitty's real screen_set_cursor: `blink = mode % 2`).
+    s = Screen()
+    s.set_cursor_shape(4)  # steady underline
+    assert s.cursor_shape == "underline"
+    assert s.cursor_blink is False
+    s.set_cursor_shape(5)  # blinking beam
+    assert s.cursor_shape == "beam"
+    assert s.cursor_blink is True
+    s.set_cursor_shape(2)  # steady block
+    assert s.cursor_shape == "block"
+    assert s.cursor_blink is False
+    s.set_cursor_shape(7)  # no cursor shape at all
+    assert s.cursor_shape == "none"
+
+
+def test_set_cursor_shape_zero_resets_to_default_blinking_block():
+    s = Screen()
+    s.set_cursor_shape(4)  # steady underline
+    s.set_cursor_shape(0)
+    assert s.cursor_shape == "block"
+    assert s.cursor_blink is True
+
+
 def test_set_window_and_icon_title():
     s = Screen()
     s.set_window_title("window")

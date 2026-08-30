@@ -194,6 +194,37 @@ def test_alt_screen_mode_does_not_leak_into_generic_private_modes():
     assert 1049 not in screen.private_modes  # handled as a special case, not generic
 
 
+def test_dectcem_hides_and_shows_cursor():
+    screen = _run(b"\x1b[?25l")
+    assert screen.cursor_visible is False
+    screen = _run(b"\x1b[?25l\x1b[?25h")
+    assert screen.cursor_visible is True
+
+
+def test_dectcem_does_not_leak_into_generic_private_modes():
+    screen = _run(b"\x1b[?25l")
+    assert 25 not in screen.private_modes  # handled as a special case, not generic
+
+
+def test_decscusr_sets_cursor_shape_and_blink():
+    screen = _run(b"\x1b[4 q")  # steady underline
+    assert screen.cursor_shape == "underline"
+    assert screen.cursor_blink is False
+
+
+def test_decscusr_default_param_resets_to_blinking_block():
+    screen = _run(b"\x1b[4 q\x1b[ q")  # steady underline, then bare "CSI SP q"
+    assert screen.cursor_shape == "block"
+    assert screen.cursor_blink is True
+
+
+def test_bare_csi_q_without_space_intermediate_is_not_decscusr():
+    # CSI q (no space intermediate) is a different, unrelated sequence --
+    # must not be misread as DECSCUSR mode 0.
+    screen = _run(b"\x1b[4 q\x1b[q")
+    assert screen.cursor_shape == "underline"  # unchanged
+
+
 def test_osc_0_sets_both_icon_and_window_title():
     screen = _run(b"\x1b]0;puppy session\x07")
     assert screen.window_title == "puppy session"

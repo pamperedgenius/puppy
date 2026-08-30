@@ -73,6 +73,10 @@ class Parser:
         # CSI > c (DA2, secondary device attributes) -- a distinct prefix from
         # '?'/'=', same '[' byte 0x3E not otherwise used as a param/separator.
         self._gt_prefix = False
+        # CSI intermediate bytes (0x20-0x2F, ECMA-48 terms) -- only tracked well
+        # enough to recognize DECSCUSR's single space intermediate (`CSI Ps SP q`,
+        # distinct from plain `CSI Ps q`), not a general intermediate-byte engine.
+        self._intermediate = ""
         self._utf8_bytes = bytearray()
         self._osc_pending_esc = False
         self._osc_buf = bytearray()
@@ -139,6 +143,7 @@ class Parser:
             self._private = False
             self._equals_prefix = False
             self._gt_prefix = False
+            self._intermediate = ""
             return
         if ch == "]":
             self.state = self.OSC
@@ -192,11 +197,15 @@ class Parser:
                 self._params.append("")
                 self._is_subparam.append(ch == ":")
             return
+        if 0x20 <= byte <= 0x2F:
+            if len(self._intermediate) < 4:
+                self._intermediate += ch
+            return
         if 0x40 <= byte <= 0x7E:
             self._dispatch_csi(ch)
             self.state = self.GROUND
             return
-        # intermediate bytes not yet handled
+        # other intermediate bytes not yet acted on
 
     def _param(self, idx: int, default: int) -> int:
         if idx >= len(self._params) or not self._params[idx]:
@@ -206,10 +215,13 @@ class Parser:
         except ValueError:
             return default
 
-    # 47/1047/1049 (alternate screen buffer) are the only private modes with real
-    # behavior wired up so far -- everything else DEC private (bracketed paste 2004,
-    # focus reporting 1004, sync output 2026, mouse 1000+, DECOM, DECAWM, ...) just
-    # gets its on/off state tracked generically via Screen.private_modes.
+    # 47/1047/1049 (alternate screen buffer) and 25 (DECTCEM cursor visibility) are
+    # the only private modes with real behavior wired up so far -- everything else
+    # DEC private (bracketed paste 2004, focus reporting 1004, sync output 2026,
+    # mouse 1000+, DECOM, DECAWM, ...) just gets its on/off state tracked
+    # generically via Screen.private_modes. 25 is special-cased rather than read
+    # off private_modes like the others because its real default is *visible*,
+    # the opposite of every other tracked mode's default-off.
     _ALT_SCREEN_MODES = frozenset({47, 1047, 1049})
 
     def _dispatch_csi(self, final: str) -> None:
@@ -256,6 +268,8 @@ class Parser:
             self.sink.delete_chars(self._param(0, 1))
         elif final == "c":
             self.sink.report_primary_device_attributes()
+        elif final == "q" and self._intermediate == " ":
+            self.sink.set_cursor_shape(self._param(0, 0))
         elif final == "m":
             params = []
             for p in self._params:
@@ -280,6 +294,8 @@ class Parser:
                     self.sink.enter_alt_screen(save_cursor)
                 else:
                     self.sink.exit_alt_screen(save_cursor)
+            elif mode == 25:
+                self.sink.set_cursor_visible(enable)
             else:
                 # Generic tracking for everything else (bracketed paste 2004, focus
                 # reporting 1004, synchronized output 2026, mouse modes, DECOM,

@@ -47,6 +47,22 @@ def test_load_theme_parses_real_kitty_colors_format(tmp_path):
     assert len(theme.ansi) == 16
 
 
+def test_load_theme_parses_real_cursor_colors(tmp_path):
+    colors = _SAMPLE_COLORS + "\ncursor #000000\ncursor_text_color #000029\n"
+    link = _make_theme_dir(tmp_path, "midnight2", colors)
+    theme = load_theme(link)
+    assert theme.cursor == (0x00, 0x00, 0x00)
+    assert theme.cursor_text_color == (0x00, 0x00, 0x29)
+
+
+def test_load_theme_cursor_colors_fall_back_to_fg_and_bg(tmp_path):
+    # _SAMPLE_COLORS has no cursor/cursor_text_color keys at all.
+    link = _make_theme_dir(tmp_path, "midnight2", _SAMPLE_COLORS)
+    theme = load_theme(link)
+    assert theme.cursor == theme.fg
+    assert theme.cursor_text_color == theme.bg
+
+
 def test_find_active_theme_dir_resolves_symlink(tmp_path):
     link = _make_theme_dir(tmp_path, "midnight2", _SAMPLE_COLORS)
     resolved = find_active_theme_dir(link)
@@ -58,6 +74,8 @@ def test_missing_wallpaper_link_falls_back_to_defaults(tmp_path):
     assert theme.fg == DEFAULT_FG
     assert theme.bg == DEFAULT_BG
     assert theme.ansi == {}
+    assert theme.cursor == DEFAULT_FG
+    assert theme.cursor_text_color == DEFAULT_BG
 
 
 def test_missing_kitty_colors_file_falls_back_to_defaults(tmp_path):

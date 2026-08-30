@@ -126,3 +126,57 @@ def test_build_instances_underline_sets_flag(font, atlas):
     instances = build_instances(screen, font, atlas)
     assert instances[0]["flags"][0] == 0.0
     assert instances[1]["flags"][0] == 1.0
+
+
+def test_build_instances_show_cursor_false_leaves_cell_unchanged(font, atlas):
+    screen = Screen(rows=1, cols=1)
+    screen.put_char("a")
+    instances = build_instances(screen, font, atlas, show_cursor=False)
+    assert list(instances[0]["fg"]) == list(srgb_color(255, 255, 255))
+    assert list(instances[0]["bg"]) == list(srgb_color(0, 0, 0))
+    assert list(instances[0]["cursor"]) == [0.0, 0.0, 0.0, 0.0]
+
+
+def test_build_instances_block_cursor_swaps_colors_at_cursor_cell(font, atlas):
+    screen = Screen(rows=1, cols=2)
+    screen.put_char("a")
+    screen.put_char("b")
+    screen.cursor_position(1, 1)  # 1-indexed CUP -> back to col 0
+    instances = build_instances(
+        screen, font, atlas, show_cursor=True, cursor_color=(1, 2, 3), cursor_text_color=(4, 5, 6)
+    )
+    assert list(instances[0]["bg"]) == list(srgb_color(1, 2, 3))
+    assert list(instances[0]["fg"]) == list(srgb_color(4, 5, 6))
+    # the non-cursor cell is untouched
+    assert list(instances[1]["bg"]) == list(srgb_color(0, 0, 0))
+    assert list(instances[1]["fg"]) == list(srgb_color(255, 255, 255))
+
+
+def test_build_instances_underline_cursor_does_not_recolor_the_glyph(font, atlas):
+    screen = Screen(rows=1, cols=1)
+    screen.put_char("a")
+    screen.set_cursor_shape(4)  # steady underline
+    instances = build_instances(screen, font, atlas, show_cursor=True, cursor_color=(9, 9, 9))
+    # text/bg colors stay the cell's real ones -- only the cursor field carries
+    # the bar color, the shader draws the actual decoration.
+    assert list(instances[0]["fg"]) == list(srgb_color(255, 255, 255))
+    assert list(instances[0]["bg"]) == list(srgb_color(0, 0, 0))
+    cr, cg, cb, _ = srgb_color(9, 9, 9)
+    assert list(instances[0]["cursor"]) == [cr, cg, cb, 1.0]
+
+
+def test_build_instances_beam_cursor_sets_shape_code_two(font, atlas):
+    screen = Screen(rows=1, cols=1)
+    screen.set_cursor_shape(6)  # blinking beam
+    instances = build_instances(screen, font, atlas, show_cursor=True, cursor_color=(9, 9, 9))
+    assert instances[0]["cursor"][3] == 2.0
+
+
+def test_build_instances_cursor_shape_none_draws_no_decoration(font, atlas):
+    screen = Screen(rows=1, cols=1)
+    screen.put_char("a")
+    screen.set_cursor_shape(7)  # DECSCUSR "no cursor shape"
+    instances = build_instances(screen, font, atlas, show_cursor=True, cursor_color=(9, 9, 9))
+    assert list(instances[0]["fg"]) == list(srgb_color(255, 255, 255))
+    assert list(instances[0]["bg"]) == list(srgb_color(0, 0, 0))
+    assert list(instances[0]["cursor"]) == [0.0, 0.0, 0.0, 0.0]

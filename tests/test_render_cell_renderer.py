@@ -64,7 +64,7 @@ def test_partially_inked_glyph_produces_exact_fg_and_bg_pixels():
     renderer = CellRenderer(gpu, atlas, rows=1, cols=1)
 
     instances = np.zeros(1, dtype=INSTANCE_DTYPE)
-    instances[0] = (0, 0, slot.col, slot.row, srgb_color(255, 0, 0), srgb_color(0, 0, 255), (0, 0, 0, 0))
+    instances[0] = (0, 0, slot.col, slot.row, srgb_color(255, 0, 0), srgb_color(0, 0, 255), (0, 0, 0, 0), (0, 0, 0, 0))
     canvas.request_draw(lambda: renderer.render(instances))
     img = canvas.draw()
 
@@ -84,7 +84,7 @@ def test_real_rasterized_glyph_renders_something_not_just_flat_bg():
     renderer = CellRenderer(gpu, atlas, rows=1, cols=1)
 
     instances = np.zeros(1, dtype=INSTANCE_DTYPE)
-    instances[0] = (0, 0, slot.col, slot.row, srgb_color(255, 255, 255), srgb_color(0, 0, 0), (0, 0, 0, 0))
+    instances[0] = (0, 0, slot.col, slot.row, srgb_color(255, 255, 255), srgb_color(0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0))
     canvas.request_draw(lambda: renderer.render(instances))
     img = canvas.draw()
 
@@ -106,8 +106,8 @@ def test_two_cells_render_independently():
     renderer = CellRenderer(gpu, atlas, rows=1, cols=2)
 
     instances = np.zeros(2, dtype=INSTANCE_DTYPE)
-    instances[0] = (0, 0, slot.col, slot.row, srgb_color(255, 0, 0), srgb_color(0, 0, 0), (0, 0, 0, 0))
-    instances[1] = (1, 0, slot.col, slot.row, srgb_color(0, 255, 0), srgb_color(0, 0, 0), (0, 0, 0, 0))
+    instances[0] = (0, 0, slot.col, slot.row, srgb_color(255, 0, 0), srgb_color(0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0))
+    instances[1] = (1, 0, slot.col, slot.row, srgb_color(0, 255, 0), srgb_color(0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0))
     canvas.request_draw(lambda: renderer.render(instances))
     img = canvas.draw()
 
@@ -127,7 +127,7 @@ def test_underline_draws_fg_colored_band_at_real_metrics_position():
     renderer = CellRenderer(gpu, atlas, rows=1, cols=1, underline_y=6, underline_thickness=2)
 
     instances = np.zeros(1, dtype=INSTANCE_DTYPE)
-    instances[0] = (0, 0, slot.col, slot.row, srgb_color(255, 0, 0), srgb_color(0, 0, 0), (1.0, 0, 0, 0))
+    instances[0] = (0, 0, slot.col, slot.row, srgb_color(255, 0, 0), srgb_color(0, 0, 0), (1.0, 0, 0, 0), (0, 0, 0, 0))
     canvas.request_draw(lambda: renderer.render(instances))
     img = canvas.draw()
 
@@ -153,8 +153,8 @@ def test_resize_grows_grid_and_new_cells_render_correctly():
 
     renderer.resize(rows=1, cols=2)
     instances = np.zeros(2, dtype=INSTANCE_DTYPE)
-    instances[0] = (0, 0, slot.col, slot.row, srgb_color(255, 0, 0), srgb_color(0, 0, 0), (0, 0, 0, 0))
-    instances[1] = (1, 0, slot.col, slot.row, srgb_color(0, 255, 0), srgb_color(0, 0, 0), (0, 0, 0, 0))
+    instances[0] = (0, 0, slot.col, slot.row, srgb_color(255, 0, 0), srgb_color(0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0))
+    instances[1] = (1, 0, slot.col, slot.row, srgb_color(0, 255, 0), srgb_color(0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0))
     canvas.request_draw(lambda: renderer.render(instances))
     img = canvas.draw()
 
@@ -173,6 +173,66 @@ def test_resize_to_same_dimensions_is_a_no_op():
     assert renderer._instance_buffer is buffer_before
 
 
+def test_cursor_underline_draws_bar_in_cursor_color_at_bottom_of_cell():
+    cell_w, cell_h = 8, 8
+    atlas = GlyphAtlas(cell_width=cell_w, cell_height=cell_h, ascender=cell_h)
+    no_ink = GlyphBitmap(width=0, height=0, bearing_x=0, bearing_y=0, pixels=b"")
+    slot = atlas.get_or_add(1, no_ink)
+
+    canvas = offscreen.RenderCanvas(size=(cell_w, cell_h))
+    gpu = GpuContext.create(canvas)
+    renderer = CellRenderer(gpu, atlas, rows=1, cols=1, underline_y=6, underline_thickness=2)
+
+    instances = np.zeros(1, dtype=INSTANCE_DTYPE)
+    # fg/bg deliberately plain black/white so the cursor's distinct green bar
+    # color is unambiguous against either; cursor shape code 1 = underline.
+    instances[0] = (0, 0, slot.col, slot.row, srgb_color(255, 255, 255), srgb_color(0, 0, 0), (0, 0, 0, 0), (*srgb_color(0, 255, 0)[:3], 1.0))
+    canvas.request_draw(lambda: renderer.render(instances))
+    img = canvas.draw()
+
+    assert list(img[0, 3]) == [0, 0, 0, 255]  # top of cell: plain bg, no cursor bar
+    assert list(img[7, 3]) == [0, 255, 0, 255]  # bottom edge: cursor's own color, not fg's
+
+
+def test_cursor_beam_draws_bar_in_cursor_color_at_left_edge_of_cell():
+    cell_w, cell_h = 8, 8
+    atlas = GlyphAtlas(cell_width=cell_w, cell_height=cell_h, ascender=cell_h)
+    no_ink = GlyphBitmap(width=0, height=0, bearing_x=0, bearing_y=0, pixels=b"")
+    slot = atlas.get_or_add(1, no_ink)
+
+    canvas = offscreen.RenderCanvas(size=(cell_w, cell_h))
+    gpu = GpuContext.create(canvas)
+    renderer = CellRenderer(gpu, atlas, rows=1, cols=1, underline_y=6, underline_thickness=2)
+
+    instances = np.zeros(1, dtype=INSTANCE_DTYPE)
+    # cursor shape code 2 = beam.
+    instances[0] = (0, 0, slot.col, slot.row, srgb_color(255, 255, 255), srgb_color(0, 0, 0), (0, 0, 0, 0), (*srgb_color(0, 255, 0)[:3], 2.0))
+    canvas.request_draw(lambda: renderer.render(instances))
+    img = canvas.draw()
+
+    assert list(img[3, 0]) == [0, 255, 0, 255]  # left edge: cursor's own color
+    assert list(img[3, 7]) == [0, 0, 0, 255]  # right edge: plain bg, no beam there
+
+
+def test_cursor_field_zero_shape_draws_no_decoration():
+    cell_w, cell_h = 8, 8
+    atlas = GlyphAtlas(cell_width=cell_w, cell_height=cell_h, ascender=cell_h)
+    no_ink = GlyphBitmap(width=0, height=0, bearing_x=0, bearing_y=0, pixels=b"")
+    slot = atlas.get_or_add(1, no_ink)
+
+    canvas = offscreen.RenderCanvas(size=(cell_w, cell_h))
+    gpu = GpuContext.create(canvas)
+    renderer = CellRenderer(gpu, atlas, rows=1, cols=1, underline_y=6, underline_thickness=2)
+
+    instances = np.zeros(1, dtype=INSTANCE_DTYPE)
+    instances[0] = (0, 0, slot.col, slot.row, srgb_color(255, 255, 255), srgb_color(0, 0, 0), (0, 0, 0, 0), (0, 255, 0, 0))
+    canvas.request_draw(lambda: renderer.render(instances))
+    img = canvas.draw()
+
+    assert list(img[7, 3]) == [0, 0, 0, 255]  # no bar despite a nonzero cursor color, shape is 0
+    assert list(img[3, 0]) == [0, 0, 0, 255]
+
+
 def test_underline_flag_off_never_draws_a_band():
     cell_w, cell_h = 8, 8
     atlas = GlyphAtlas(cell_width=cell_w, cell_height=cell_h, ascender=cell_h)
@@ -184,7 +244,7 @@ def test_underline_flag_off_never_draws_a_band():
     renderer = CellRenderer(gpu, atlas, rows=1, cols=1, underline_y=6, underline_thickness=2)
 
     instances = np.zeros(1, dtype=INSTANCE_DTYPE)
-    instances[0] = (0, 0, slot.col, slot.row, srgb_color(255, 0, 0), srgb_color(0, 0, 0), (0.0, 0, 0, 0))
+    instances[0] = (0, 0, slot.col, slot.row, srgb_color(255, 0, 0), srgb_color(0, 0, 0), (0.0, 0, 0, 0), (0, 0, 0, 0))
     canvas.request_draw(lambda: renderer.render(instances))
     img = canvas.draw()
 

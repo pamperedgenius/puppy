@@ -9,9 +9,14 @@ resolved via puppy.render.palette (ansi256 + Screen.palette OSC-4 overrides),
 reverse video handled by swapping fg/bg. Bold uses FreeType's real synthetic
 emboldening (see font.py), underline is drawn at the font's real
 underline_y/thickness metrics (see cell_renderer.py) -- neither is a
-placeholder. Key/mouse input is wired via puppy.render.input_state's
-InputState, including the kitty keyboard protocol once a program opts in
-(see puppy.kitty_keyboard's module docstring for its scope limits).
+placeholder. The text cursor (block/underline/beam, DECSCUSR-selectable,
+DECTCEM show/hide, real 1Hz blink) is rendered the same way -- see
+draw_frame() and build_instances()'s show_cursor/cursor_color/
+cursor_text_color params, and cell_renderer.py's module docstring for how
+each shape is actually drawn. Key/mouse input is wired via
+puppy.render.input_state's InputState, including the kitty keyboard protocol
+once a program opts in (see puppy.kitty_keyboard's module docstring for its
+scope limits).
 
 Default colors come from RengeOS's active theme-switcher scheme (see
 theme.py) -- ANSI 0-15 are pre-loaded into Screen.palette exactly as if a
@@ -34,6 +39,7 @@ from __future__ import annotations
 import select
 import shutil
 import subprocess
+import time
 
 import numpy as np
 
@@ -77,9 +83,33 @@ def find_bold_monospace_font() -> str | None:
 
 
 def build_instances(
-    screen: Screen, font: FontRenderer, atlas: GlyphAtlas, default_fg: tuple[int, int, int] = DEFAULT_FG, default_bg: tuple[int, int, int] = DEFAULT_BG
+    screen: Screen,
+    font: FontRenderer,
+    atlas: GlyphAtlas,
+    default_fg: tuple[int, int, int] = DEFAULT_FG,
+    default_bg: tuple[int, int, int] = DEFAULT_BG,
+    show_cursor: bool = False,
+    cursor_color: tuple[int, int, int] = DEFAULT_FG,
+    cursor_text_color: tuple[int, int, int] = DEFAULT_BG,
 ) -> np.ndarray:
+    """show_cursor gates whether *any* cursor decoration is applied this frame
+    -- callers (app.py's draw_frame) are responsible for combining
+    Screen.cursor_visible (DECTCEM) with real blink timing before passing
+    this in; it deliberately does NOT default to reading screen.cursor_visible
+    itself, so every existing caller/test that doesn't care about the cursor
+    keeps rendering exactly as before (cursor defaults to (0, 0) on a fresh
+    Screen, which would otherwise silently paint over cell (0, 0) in tests
+    that never asked for a cursor)."""
     instances = np.zeros(screen.rows * screen.cols, dtype=INSTANCE_DTYPE)
+    cursor_shape = screen.cursor_shape if show_cursor else "none"
+    # Screen.put_char lets cursor_col reach exactly screen.cols right after
+    # filling the last column (a deferred-wrap state -- the actual wrap only
+    # happens on the *next* write, matching real terminal behavior). Clamp
+    # for rendering purposes only, so the visible cursor stays glued to the
+    # last column instead of vanishing (matching every other terminal off
+    # this exact state) rather than mutating Screen's own wrap-pending state.
+    cursor_row = min(screen.cursor_row, screen.rows - 1)
+    cursor_col = min(screen.cursor_col, screen.cols - 1)
     idx = 0
     for row_idx, row in enumerate(screen.grid):
         for col_idx, cell in enumerate(row):
@@ -93,7 +123,20 @@ def build_instances(
                 fg_rgb, bg_rgb = bg_rgb, fg_rgb
 
             flags = (1.0 if cell.underline else 0.0, 0.0, 0.0, 0.0)
-            instances[idx] = (col_idx, row_idx, slot.col, slot.row, srgb_color(*fg_rgb), srgb_color(*bg_rgb), flags)
+            cursor = (0.0, 0.0, 0.0, 0.0)
+            is_cursor_cell = row_idx == cursor_row and col_idx == cursor_col
+            if is_cursor_cell and cursor_shape == "block":
+                # A block cursor is drawn by simply painting this one cell in
+                # the cursor's own colors instead of the cell's real ones --
+                # the character underneath still renders (now in
+                # cursor_text_color over a cursor_color background), no
+                # separate quad or shader support needed.
+                fg_rgb, bg_rgb = cursor_text_color, cursor_color
+            elif is_cursor_cell and cursor_shape in ("underline", "beam"):
+                shape_code = 1.0 if cursor_shape == "underline" else 2.0
+                cr, cg, cb, _ = srgb_color(*cursor_color)
+                cursor = (cr, cg, cb, shape_code)
+            instances[idx] = (col_idx, row_idx, slot.col, slot.row, srgb_color(*fg_rgb), srgb_color(*bg_rgb), flags, cursor)
             idx += 1
     return instances
 
@@ -165,7 +208,22 @@ def run(rows: int = 24, cols: int = 80, pixel_size: int = 16) -> None:
     window.set_framebuffer_size_handler(on_resize)
 
     def draw_frame() -> None:
-        renderer.render(build_instances(screen, font, atlas, default_fg=theme.fg, default_bg=theme.bg))
+        # Blinks at 1Hz (visible for 500ms, hidden for 500ms) when the shape's
+        # blink flag is set (the DECSCUSR/default state) -- matches the classic
+        # terminal cursor-blink cadence, not a made-up interval.
+        show_cursor = screen.cursor_visible and (not screen.cursor_blink or int(time.time() * 2) % 2 == 0)
+        renderer.render(
+            build_instances(
+                screen,
+                font,
+                atlas,
+                default_fg=theme.fg,
+                default_bg=theme.bg,
+                show_cursor=show_cursor,
+                cursor_color=theme.cursor,
+                cursor_text_color=theme.cursor_text_color,
+            )
+        )
         graphics_renderer.render(screen.graphics, cols=screen.cols, rows=screen.rows, cell_width=font.cell_width, cell_height=font.cell_height)
 
     try:

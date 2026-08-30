@@ -74,6 +74,94 @@ found because writing an honest terminfo entry (which has a `bce` capability fla
 forced the question "do we actually do this?" Worth treating protocol/terminfo work
 as a trigger for another verification pass, not just a one-time audit.
 
+## Current status (2026-08-31)
+
+**Visible text cursor built — the user picked this explicitly from the
+"daily-driver basics" list the 2026-08-24 session left open, over extending
+the kitty graphics protocol further.** Full DECSCUSR/DECTCEM support, all
+three real shapes, real blinking, all theme-driven. 292 tests passing (up
+from 273), including 3 new real GPU pixel-readback proofs of the shader
+logic. Committed and pushed this session.
+
+- **`Screen`**: `cursor_visible` (bool, defaults `True`) + `set_cursor_visible()`
+  for DECTCEM (`CSI ?25h/l`); `cursor_shape` (`"block"`/`"underline"`/`"beam"`/
+  `"none"`) + `cursor_blink` (bool) + `set_cursor_shape()` for DECSCUSR
+  (`CSI Ps SP q`), mode-to-shape/blink mapping confirmed exact against kitty's
+  real `screen_set_cursor` (`screen.c`) — odd modes blink, even modes are
+  steady, mode 0 resets to the default blinking block, mode 7+ means no
+  cursor shape at all (distinct from DECTCEM's own visibility toggle).
+- **`Parser`**: mode 25 is special-cased in `_dispatch_private_mode` (like
+  alt-screen) rather than folded into the generic `private_modes` set, since
+  its real default is *visible* — the opposite of every other tracked mode's
+  default-off. New minimal intermediate-byte tracking (`_intermediate`,
+  0x20-0x2F bytes, capped at 4 chars) recognizes DECSCUSR's single space
+  intermediate (`CSI Ps SP q`) as distinct from a bare `CSI Ps q` — not a
+  general intermediate-byte engine, just enough for this one real sequence.
+- **`theme.py`**: `Theme.cursor`/`cursor_text_color`, parsed from
+  `kitty-colors.conf`'s real `cursor`/`cursor_text_color` keys (confirmed
+  present in every real theme checked), falling back to `fg`/`bg` when a
+  theme doesn't set them.
+- **Rendering** (`cell_renderer.py` + `app.py`): a block cursor needs no
+  shader support at all — `build_instances()` just swaps that one cell's
+  fg/bg to `cursor_text_color`/`cursor_color` before upload, so the character
+  underneath still renders, now in contrasting colors, no extra draw call or
+  instance. Underline/beam shapes *do* need shader support (a bar decoration
+  that doesn't touch the glyph or the cell's real fg/bg): the `Instance`
+  struct grew a `cursor: vec4<f32>` field (rgb = bar color, w = shape code:
+  0=none/1=underline/2=beam) and the fragment shader draws a thin bar at the
+  cell's bottom or left edge (reusing the existing `underline_thickness`
+  uniform for the bar width rather than adding a new one) — independent of,
+  and drawn after, the real text-underline band, so a cursor can sit on an
+  underlined cell without conflict. `draw_frame()` computes real 1Hz blink
+  timing (`int(time.time() * 2) % 2 == 0`, gated by `cursor_blink` and
+  `cursor_visible`) and passes it into `build_instances()`'s new
+  `show_cursor`/`cursor_color`/`cursor_text_color` params — which default to
+  "off"/plain-fg/plain-bg, so every pre-existing caller/test that doesn't
+  care about the cursor renders exactly as before.
+- **Instance struct grew, all existing tuple-constructed test instances
+  updated** (8 sites in `test_render_cell_renderer.py` + `app.py`'s own
+  `build_instances`) to append the new `cursor` field — same kind of
+  mechanical-but-real update the underline flag's addition needed earlier.
+- **Real bug found and fixed while testing this, not before shipping it**:
+  `Screen.put_char` legitimately lets `cursor_col` reach exactly `screen.cols`
+  right after filling the last column (a deferred-wrap state — the actual
+  wrap only happens on the *next* write, matching real terminal behavior).
+  `build_instances()` was comparing against the raw `screen.cursor_row/col`,
+  so the cursor briefly vanished (matched no real cell) every time it sat in
+  that state — e.g. typing into a narrow/full terminal. Fixed by clamping to
+  `rows-1`/`cols-1` for rendering purposes only, matching how every other
+  terminal keeps the cursor visually glued to the last column instead of
+  disappearing off the edge; `Screen`'s own wrap-pending state is untouched.
+  Caught by a test (`cols=1`, immediately after `put_char`) before it ever
+  reached a live window, not found by eyeballing.
+- **Live smoke-tested, not yet visually confirmed with real contrast.**
+  `timeout 5/8 python -m puppy.render.app` starts and runs clean, no crash/
+  traceback, and `niri msg windows` confirms the window opens correctly. But
+  the *currently active* RengeOS theme (`focusedpanic`) sets `cursor #000000`
+  against a `#0c151e` background (`(12, 21, 30)`) — barely distinguishable
+  from the background even when rendering exactly correctly, confirmed
+  directly via `load_theme()` rather than assumed. **This is the exact same
+  root-cause category as the already-diagnosed cat-art/`unifetch-colors.conf`
+  issue from 2026-08-24** (a theme content choice, not a puppy rendering
+  bug) — flagged directly to the user mid-session when they asked "why are
+  the colors still weird" about an old test screenshot, and confirmed by
+  them to be that already-known cat-art issue, unrelated to the cursor work.
+  A theme with genuine cursor/background contrast was found for a real
+  future visual proof but not yet used: `vim-substrata`
+  (`cursor #f0ecfe` on `background #191c25`) — **next session, if a live
+  visual confirmation of the cursor is still wanted, switch to that theme
+  first** (or pass a `Theme(...)` with contrasting colors directly to
+  `run()`/`build_instances()` for a one-off check) rather than relying on
+  `focusedpanic`'s own near-black cursor color, which will always look faint
+  or invisible here regardless of whether the code is correct.
+- **Not built this session** (real, deliberate scope cuts, not oversights):
+  no focus-based shape difference (kitty dims/hollows the cursor when the
+  window loses focus — puppy always renders as if focused); no
+  `cursor_text_color`-vs-fg HSLuv contrast override (kitty has one, puppy
+  just uses the theme's literal `cursor_text_color`); multi-cursor (kitty's
+  `extra_cursors`) not implemented, single cursor only, matching this
+  project's scope so far.
+
 ## Current status (2026-08-24)
 
 **Second live user bug report this session, all 3 real issues fixed, 273 tests
@@ -969,6 +1057,19 @@ with the date when something is confirmed working (not just "code exists").
       visible text cursor, no text selection, no scrollback UI/mouse-wheel-into-
       history) rather than continuing kitty-graphics-protocol completeness — see
       Next steps below, ask the user rather than picking unilaterally.
+- [x] **Visible text cursor — 2026-08-31.** Block/underline/beam shapes
+      (DECSCUSR, `CSI Ps SP q`), DECTCEM show/hide (`CSI ?25h/l`), real 1Hz
+      blink, all colors theme-driven (`kitty-colors.conf`'s `cursor`/
+      `cursor_text_color` keys). See the Current status entry dated
+      2026-08-31 for full implementation detail (`Screen`/`Parser`/`theme.py`/
+      `cell_renderer.py`/`app.py` changes, the real deferred-wrap clamp bug
+      found and fixed while testing this, and why live visual confirmation
+      needs a theme switch first). 19 new tests (292 total, up from 273),
+      including 3 real GPU pixel-readback proofs of the underline/beam bar
+      shader logic. Live smoke-tested (no crash/traceback), not yet visually
+      confirmed with real contrast — the currently active theme's own cursor
+      color is itself near-black against its background, unrelated to this
+      code's correctness.
 
 ## File map
 
@@ -1033,8 +1134,10 @@ dependencies live there, not in system Python. `pip install -e .` again if the v
 is ever recreated (it's gitignored).
 
 **Nothing is mid-flight; there is no unfinished code to pick back up.** Everything
-through the 2026-08-24 fix pass (DA1/DA2, real bold face, blur app-id) is real,
-committed, pushed, test-covered (273 passing), and live-confirmed.
+through the 2026-08-31 cursor pass (see the Current status entry dated 2026-08-31
+for full detail) is real, committed, pushed, test-covered (292 passing), and
+smoke-tested live (not yet visually confirmed with real contrast -- see that
+entry for why, and which theme to switch to first if that's still wanted).
 
 ### 2026-08-24 session recap (second live user bug-report pass)
 
@@ -1069,37 +1172,34 @@ dated 2026-08-24 for full detail, and the Milestones entries below):
 - **Launch still feels slow** — not re-investigated this pass, no new information
   beyond the existing ~1.1s/wgpu-bring-up-dominated measurement from 2026-08-20.
 
-**The real open question for the next session, not yet answered by the user**: is
-puppy's current scope (kitty keyboard protocol, kitty graphics protocol direct+PNG,
-baseline VT100/xterm) "enough" for now, or should the next real priority shift to
-*daily-driver basics that are currently missing entirely*, which is what actually
-separates puppy from being a complete terminal like kitty/OdyTTY rather than any
-single protocol gap:
-- **No visible text cursor at all.** `Screen.cursor_row`/`cursor_col` are tracked
-  (needed for correctly positioning writes) but `build_instances()`/`CellRenderer`
-  never render a cursor block/bar/underline at that position — confirmed by reading
-  the code, not assumed. This is probably the single most conspicuous "this isn't a
-  real terminal yet" gap for anyone actually trying to use it.
+**Picking up the "daily-driver basics" list from 2026-08-24**: the visible
+cursor (the item flagged as probably the single most conspicuous gap) is now
+done, see the 2026-08-31 Current status entry. Two of the original three
+remain, still real gaps, confirmed by reading the code not assumed:
 - **No text selection** (click-drag to select, copy). The only "selection" in the
   codebase is OSC 52 clipboard-buffer naming (`c`/`p`/`s`), unrelated to visual
-  text-selection UI — confirmed by reading the code, not assumed.
+  text-selection UI.
 - **No scrollback UI.** `Screen` stores scrollback (`deque(maxlen=2000)`) but
   nothing lets a user actually view it — `input_state.py`'s `on_scroll` only forwards
   wheel events to the child program via the mouse protocol, it doesn't move puppy's
-  own viewport into history when no program has claimed mouse reporting. Confirmed by
-  reading the code, not assumed.
-- Also still missing entirely, lower priority than the three above: tabs/splits, any
+  own viewport into history when no program has claimed mouse reporting.
+- Also still missing entirely, lower priority than the two above: tabs/splits, any
   config file (font size/theme/keybinds are all still hardcoded in `app.py`), Sixel,
   most of kitty's graphics extras (`a=p`/`a=d`/`a=q`, z-index, animation), ligatures/
   complex-script shaping.
 
 Ask the user which of these to prioritize before picking a direction — don't just
-pick one unilaterally, this is exactly the kind of scope call that should be
-confirmed first, especially given a stated concern this session about spending
-effort well. If they'd rather keep extending kitty-graphics-protocol completeness
-instead (the previous session's direction), that's still a valid, real, independent
-option — see the `[ ]` Milestones entries below for `a=p`/`a=d`/`a=q`, z-index
-layering, and Sixel, each with the exact key/action list needed.
+pick one unilaterally, same reasoning as last time this list was picked from. If
+they'd rather keep extending kitty-graphics-protocol completeness instead, that's
+still a valid, real, independent option — see the `[ ]` Milestones entries below
+for `a=p`/`a=d`/`a=q`, z-index layering, and Sixel, each with the exact key/action
+list needed.
+
+Separately, low-effort/high-value if there's a spare cycle: switch the active
+RengeOS theme to `vim-substrata` (real cursor/bg contrast, `#f0ecfe` on `#191c25`
+— see 2026-08-31 entry) and take one real live screenshot of the cursor blinking
+in a window, the one piece of this feature that's tested and smoke-tested but not
+yet actually seen.
 
 Separately, whenever there's a spare cycle, unrelated to any of the above: live-test
    `TERM=puppy python -m puppy` (the *text* pass-through harness, `__main__.py`) in a

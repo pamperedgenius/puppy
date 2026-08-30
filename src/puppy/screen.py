@@ -48,6 +48,16 @@ class Screen:
         self.cols = cols
         self.cursor_row = 0
         self.cursor_col = 0
+        # DECTCEM (CSI ?25h/l) and DECSCUSR (CSI Ps SP q). Unlike the generic
+        # private_modes set (default off), mode 25's real default is *visible*
+        # -- so it's tracked as its own bool rather than folded into that set,
+        # same rationale as alt-screen getting special-cased in Parser instead
+        # of generic tracking. shape/blink default to a blinking block cursor,
+        # matching DECSCUSR mode 0/1's real meaning (confirmed against kitty's
+        # real screen_set_cursor in screen.c).
+        self.cursor_visible = True
+        self.cursor_shape = "block"  # "block" | "underline" | "beam" | "none"
+        self.cursor_blink = True
         self._sgr: dict = self._default_sgr()
         self.grid: list[list[Cell]] = self._blank_grid(rows, cols)
         # DECSTBM scroll region (0-indexed, inclusive). Full screen until CSI r
@@ -145,6 +155,29 @@ class Screen:
             self.private_modes.add(mode)
         else:
             self.private_modes.discard(mode)
+
+    def set_cursor_visible(self, visible: bool) -> None:
+        """DECTCEM (CSI ?25h/l)."""
+        self.cursor_visible = visible
+
+    def set_cursor_shape(self, mode: int) -> None:
+        """DECSCUSR (CSI Ps SP q). mode/shape/blink mapping confirmed exact
+        against kitty's real screen_set_cursor (screen.c): mode 0 resets to
+        the default blinking block; odd modes blink, even modes are steady;
+        1/2=block, 3/4=underline, 5/6=beam, 7+=no cursor shape at all (drawn
+        as invisible, distinct from DECTCEM's own visibility toggle)."""
+        if mode <= 0:
+            self.cursor_shape, self.cursor_blink = "block", True
+            return
+        self.cursor_blink = bool(mode % 2)
+        if mode < 3:
+            self.cursor_shape = "block"
+        elif mode < 5:
+            self.cursor_shape = "underline"
+        elif mode < 7:
+            self.cursor_shape = "beam"
+        else:
+            self.cursor_shape = "none"
 
     @property
     def bracketed_paste(self) -> bool:

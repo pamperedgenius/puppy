@@ -45,6 +45,13 @@ class Theme:
     bg: tuple[int, int, int] = DEFAULT_BG
     # index (0-15) -> "#rrggbb", ready to hand straight to Screen.set_palette_color
     ansi: dict[int, str] = field(default_factory=dict)
+    # Cursor block/decoration color and the text color drawn on top of a block
+    # cursor. Real theme-switcher themes ship both (`cursor`/`cursor_text_color`
+    # in kitty-colors.conf, confirmed against midnight2's real file) -- default
+    # to fg-on-bg (a plain inverse-video block) when a theme doesn't set them,
+    # same convention most terminals fall back to.
+    cursor: tuple[int, int, int] = DEFAULT_FG
+    cursor_text_color: tuple[int, int, int] = DEFAULT_BG
 
 
 def _parse_hex(spec: str) -> tuple[int, int, int] | None:
@@ -92,9 +99,11 @@ def load_theme(wallpaper_link: str = _DEFAULT_WALLPAPER_LINK) -> Theme:
     values = _parse_kitty_colors(colors_path)
     fg = _parse_hex(values.get("foreground", "")) or DEFAULT_FG
     bg = _parse_hex(values.get("background", "")) or DEFAULT_BG
+    cursor = _parse_hex(values.get("cursor", "")) or fg
+    cursor_text_color = _parse_hex(values.get("cursor_text_color", "")) or bg
     ansi: dict[int, str] = {}
     for i in range(16):
         spec = values.get(f"color{i}")
         if spec is not None and _parse_hex(spec) is not None:
             ansi[i] = spec
-    return Theme(fg=fg, bg=bg, ansi=ansi)
+    return Theme(fg=fg, bg=bg, ansi=ansi, cursor=cursor, cursor_text_color=cursor_text_color)

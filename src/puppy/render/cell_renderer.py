@@ -4,7 +4,11 @@ the cell's background with the confirmed premultiplied "over" blend from
 kitty's real alpha-blend.slang (`result = over + under*(1-over.a)`,
 simplified here since bg is always fully opaque: `fg*alpha + bg*(1-alpha)`),
 then an underline band (if flagged) drawn as a solid fg-colored line at the
-font's real underline_y/underline_thickness metrics.
+font's real underline_y/underline_thickness metrics, then a cursor
+underline/beam decoration bar (if flagged, in the cursor's own color,
+independent of the text-underline flag/color above -- a block-shaped cursor
+needs no shader support at all, it's built by simply swapping that one
+instance's fg/bg to the cursor colors before upload, see app.py).
 
 Verified against the real GPU before trusting this design: a partially-inked
 synthetic glyph (left half alpha=255, right half alpha=0) produced exact
@@ -44,6 +48,7 @@ struct Instance {
     fg: vec4<f32>,
     bg: vec4<f32>,
     flags: vec4<f32>,  // x = underline (0 or 1), y/z/w reserved
+    cursor: vec4<f32>,  // rgb = cursor bar color, w = shape (0=none, 1=underline, 2=beam)
 };
 
 struct Uniforms {
@@ -66,6 +71,8 @@ struct VOut {
     @location(2) bg: vec4<f32>,
     @location(3) cell_v: f32,
     @location(4) underline: f32,
+    @location(5) cell_u: f32,
+    @location(6) cursor: vec4<f32>,
 };
 
 @vertex
@@ -88,7 +95,9 @@ fn vs_main(@builtin(vertex_index) vidx: u32, @builtin(instance_index) iidx: u32)
     out.fg = inst.fg;
     out.bg = inst.bg;
     out.cell_v = cy;
+    out.cell_u = cx;
     out.underline = inst.flags.x;
+    out.cursor = inst.cursor;
     return out;
 }
 
@@ -101,6 +110,23 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
         let half_thickness = u.underline.y * 0.5;
         if (abs(pixel_y - u.underline.x) <= half_thickness) {
             rgb = in.fg.rgb;
+        }
+    }
+    // Cursor underline/beam decoration: a bar in the cursor's own color, at
+    // the very bottom edge (underline shape) or very left edge (beam shape)
+    // of the cell, reusing the font's underline thickness as the bar's
+    // width -- independent of, and drawn after, the text-underline band
+    // above so a cursor can sit on an underlined cell without conflict.
+    // Block-shaped cursors don't reach this shader at all -- see app.py.
+    if (in.cursor.w > 1.5) {
+        let pixel_x = in.cell_u * u.cell_size.x;
+        if (pixel_x <= u.underline.y) {
+            rgb = in.cursor.rgb;
+        }
+    } else if (in.cursor.w > 0.5) {
+        let pixel_y = in.cell_v * u.cell_size.y;
+        if (pixel_y >= u.cell_size.y - u.underline.y) {
+            rgb = in.cursor.rgb;
         }
     }
     return vec4<f32>(rgb, 1.0);
@@ -117,6 +143,7 @@ INSTANCE_DTYPE = np.dtype(
         ("fg", "f4", 4),
         ("bg", "f4", 4),
         ("flags", "f4", 4),
+        ("cursor", "f4", 4),
     ]
 )
 
