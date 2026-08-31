@@ -263,3 +263,70 @@ def test_left_click_while_scrolled_back_does_not_start_a_selection(state_with_cl
     state.on_mouse_button(glfw.MOUSE_BUTTON_LEFT, glfw.PRESS, 0)
     assert state.selecting is False
     assert state.screen.has_selection() is False
+
+
+# --- double/triple-click select ---
+
+
+class _FakeClock:
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+
+@pytest.fixture
+def clicking_state():
+    screen = Screen(rows=3, cols=10)
+    for i, ch in enumerate("hello"):
+        screen.grid[0][i].char = ch
+    session = _StubSession()
+    clock = _FakeClock()
+    state = InputState(session, screen, _StubFont(), clock=clock)
+    return state, clock
+
+
+def test_second_click_on_same_cell_within_interval_selects_the_word(clicking_state):
+    state, clock = clicking_state
+    state.on_cursor_pos(16.0, 0.0)  # col = 16 // 8 = 2, inside "hello"
+    state.on_mouse_button(glfw.MOUSE_BUTTON_LEFT, glfw.PRESS, 0)  # click 1
+    state.on_mouse_button(glfw.MOUSE_BUTTON_LEFT, glfw.RELEASE, 0)
+    clock.t += 0.1
+    state.on_mouse_button(glfw.MOUSE_BUTTON_LEFT, glfw.PRESS, 0)  # click 2, same cell
+    assert state.screen.selected_text() == "hello"
+
+
+def test_third_click_selects_the_whole_line(clicking_state):
+    state, clock = clicking_state
+    state.on_cursor_pos(16.0, 0.0)
+    state.on_mouse_button(glfw.MOUSE_BUTTON_LEFT, glfw.PRESS, 0)
+    state.on_mouse_button(glfw.MOUSE_BUTTON_LEFT, glfw.RELEASE, 0)
+    clock.t += 0.1
+    state.on_mouse_button(glfw.MOUSE_BUTTON_LEFT, glfw.PRESS, 0)
+    state.on_mouse_button(glfw.MOUSE_BUTTON_LEFT, glfw.RELEASE, 0)
+    clock.t += 0.1
+    state.on_mouse_button(glfw.MOUSE_BUTTON_LEFT, glfw.PRESS, 0)
+    assert state.screen.selected_text() == "hello"  # whole row 0, rstripped
+
+
+def test_click_count_resets_after_the_interval_expires(clicking_state):
+    state, clock = clicking_state
+    state.on_cursor_pos(16.0, 0.0)
+    state.on_mouse_button(glfw.MOUSE_BUTTON_LEFT, glfw.PRESS, 0)
+    state.on_mouse_button(glfw.MOUSE_BUTTON_LEFT, glfw.RELEASE, 0)
+    clock.t += 10.0  # well past the click interval
+    state.on_mouse_button(glfw.MOUSE_BUTTON_LEFT, glfw.PRESS, 0)
+    assert state._click_count == 1
+    assert state.screen.has_selection() is False  # a plain click, no drag yet
+
+
+def test_click_count_resets_on_a_different_cell(clicking_state):
+    state, clock = clicking_state
+    state.on_cursor_pos(16.0, 0.0)  # col 2
+    state.on_mouse_button(glfw.MOUSE_BUTTON_LEFT, glfw.PRESS, 0)
+    state.on_mouse_button(glfw.MOUSE_BUTTON_LEFT, glfw.RELEASE, 0)
+    clock.t += 0.1
+    state.on_cursor_pos(32.0, 0.0)  # col 4, different cell
+    state.on_mouse_button(glfw.MOUSE_BUTTON_LEFT, glfw.PRESS, 0)
+    assert state._click_count == 1

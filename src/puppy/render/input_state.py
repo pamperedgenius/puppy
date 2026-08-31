@@ -32,6 +32,19 @@ selection methods for the model half; copy_to_clipboard (constructor-
 injected, no-op default -- same pattern as Screen.write_back) is called once,
 on release, with the finished selection's text.
 
+Double/triple-click note: a left press within `_CLICK_INTERVAL` seconds of the
+previous one, on the same cell, bumps a 1/2/3 click counter (kitty's own real
+`click_interval` fallback default, 0.5s, confirmed against kitty's
+options/definition.py -- same-cell rather than a pixel-distance tolerance is
+a deliberate v1 simplification, cheap to reason about since positions are
+already cell-quantized). 2 calls `Screen.select_word`, 3 calls
+`Screen.select_line`, matching real terminal convention. **Real, documented
+gap**: after a word/line click, a subsequent drag (without releasing) falls
+through to ordinary per-cell extension from that word/line's boundary, not
+kitty's own word-wise/line-wise drag-extend behavior -- the initial multi-
+click selection itself is correct, dragging past it isn't multi-click-aware.
+
+
 Scrollback-view note: wheel scroll follows the exact same
 "local-vs-forwarded" split as selection -- `screen.mouse_reporting_active`
 gates whether a wheel event moves puppy's own viewport into history
@@ -46,6 +59,7 @@ here).
 """
 from __future__ import annotations
 
+import time
 from typing import Callable
 
 import glfw
@@ -62,10 +76,18 @@ _GLFW_BUTTON_MAP = {
 
 _DECCKM_MODE = 1
 _WHEEL_SCROLL_MULTIPLIER = 5  # kitty's real wheel_scroll_multiplier default
+_CLICK_INTERVAL = 0.5  # kitty's real click_interval fallback default (seconds)
 
 
 class InputState:
-    def __init__(self, session, screen, font, copy_to_clipboard: Callable[[str], None] | None = None) -> None:
+    def __init__(
+        self,
+        session,
+        screen,
+        font,
+        copy_to_clipboard: Callable[[str], None] | None = None,
+        clock: Callable[[], float] | None = None,
+    ) -> None:
         self.session = session
         self.screen = screen
         self.font = font
@@ -73,6 +95,10 @@ class InputState:
         # selection keeps working unchanged -- same pattern as Screen.
         # write_back.
         self.copy_to_clipboard: Callable[[str], None] = copy_to_clipboard or (lambda text: None)
+        # Injectable so tests can control click timing deterministically
+        # instead of racing real wall-clock sleeps -- defaults to the real
+        # clock for every actual caller (app.py).
+        self._clock: Callable[[], float] = clock or time.monotonic
         self.current_mods = 0
         self.pressed_button: MouseButton | None = None
         self.last_col = 0
@@ -81,6 +107,10 @@ class InputState:
         # text, distinct from pressed_button (which also tracks button-held
         # state for the mouse-*reporting* path).
         self.selecting = False
+        # Double/triple-click detection state, see module docstring.
+        self._last_click_time = 0.0
+        self._last_click_cell: tuple[int, int] | None = None
+        self._click_count = 0
 
     def on_key(self, key: int, scancode: int, action: int, mods: int) -> None:
         self.current_mods = mods
@@ -129,7 +159,20 @@ class InputState:
             if (shift or not self.screen.mouse_reporting_active) and not self.screen.scrolled_back:
                 self.selecting = True
                 self.pressed_button = mb
-                self.screen.start_selection(self.last_row, self.last_col)
+                now = self._clock()
+                cell = (self.last_row, self.last_col)
+                if cell == self._last_click_cell and (now - self._last_click_time) <= _CLICK_INTERVAL:
+                    self._click_count = self._click_count % 3 + 1  # 1 -> 2 -> 3 -> 1 -> ...
+                else:
+                    self._click_count = 1
+                self._last_click_time = now
+                self._last_click_cell = cell
+                if self._click_count == 2:
+                    self.screen.select_word(self.last_row, self.last_col)
+                elif self._click_count == 3:
+                    self.screen.select_line(self.last_row)
+                else:
+                    self.screen.start_selection(self.last_row, self.last_col)
                 return
         if mb is MouseButton.LEFT and action == glfw.RELEASE and self.selecting:
             self.selecting = False

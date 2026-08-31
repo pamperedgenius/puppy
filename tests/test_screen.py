@@ -742,3 +742,47 @@ def test_in_alt_screen_property():
     assert s.in_alt_screen is True
     s.exit_alt_screen()
     assert s.in_alt_screen is False
+
+
+# --- double/triple-click select ---
+
+
+def test_select_word_selects_contiguous_word_characters():
+    s = Screen(rows=1, cols=20)
+    _fill_row(s, 0, "hello world.py-here")
+    s.select_word(0, 2)  # inside "hello"
+    assert s.selected_text() == "hello"
+
+
+def test_select_word_includes_kittys_real_punctuation_set():
+    s = Screen(rows=1, cols=20)
+    _fill_row(s, 0, "world.py-here again")
+    s.select_word(0, 2)  # inside "world.py-here", which includes '.' and '-'
+    assert s.selected_text() == "world.py-here"
+
+
+def test_select_word_on_whitespace_selects_nothing():
+    s = Screen(rows=1, cols=10)
+    _fill_row(s, 0, "abc   def")
+    s.select_word(0, 4)  # a space
+    assert s.has_selection() is False
+    assert s.selected_text() == ""
+
+
+def test_select_word_at_the_start_or_end_of_a_line():
+    s = Screen(rows=1, cols=5)
+    _fill_row(s, 0, "hello")
+    s.select_word(0, 0)
+    assert s.selected_text() == "hello"
+    s.select_word(0, 4)
+    assert s.selected_text() == "hello"
+
+
+def test_select_line_selects_the_whole_row():
+    s = Screen(rows=2, cols=10)
+    _fill_row(s, 0, "hi")
+    _fill_row(s, 1, "second row")
+    s.select_line(0)
+    assert s.selected_text() == "hi"  # trailing blanks rstripped
+    s.select_line(1)
+    assert s.selected_text() == "second row"

@@ -74,6 +74,51 @@ found because writing an honest terminfo entry (which has a `bce` capability fla
 forced the question "do we actually do this?" Worth treating protocol/terminfo work
 as a trigger for another verification pass, not just a one-time audit.
 
+## Current status (2026-08-31, double/triple-click select)
+
+**Double-click word-select and triple-click line-select built — the smallest
+of the candidates offered after the three daily-driver basics were done
+(picked as a direct, low-risk extension of the already-tested selection
+model, no new architecture). 336 tests passing (up from 327), 9 new.**
+
+- **`Screen`**: `select_word(row, col)` (confined to one row -- words don't
+  span line wraps, matching how `selected_text()`/`cell_selected()` are
+  already main-screen-grid-only in scope) and `select_line(row)` (the full
+  row, `selected_text()`'s existing per-line rstrip trims trailing blanks
+  same as always). Word-character set is kitty's real
+  `select_by_word_characters` default, `@-./_~?&=%+#`, confirmed against
+  kitty's `options/definition.py`, plus anything Python's `str.isalnum()`
+  agrees is alphanumeric (matching kitty's own documented rule: its literal
+  set "in addition to" real Unicode alphanumerics). Clicking on a
+  non-word character (whitespace, or anything outside that set)
+  deliberately selects nothing, rather than guessing at kitty's separate,
+  more complex whitespace-run convention.
+- **`InputState`**: a left press within `_CLICK_INTERVAL` (0.5s, kitty's
+  real `click_interval` fallback default) of the previous one, on the same
+  cell, bumps a 1→2→3→1… click counter; 2 calls `select_word`, 3 calls
+  `select_line`. New injectable `clock: Callable[[], float] | None = None`
+  constructor param (defaults to `time.monotonic`, same no-op-default-
+  injection pattern as `copy_to_clipboard`/`Screen.write_back`) lets tests
+  drive click timing deterministically instead of racing real sleeps.
+  Same-cell (not pixel-distance) tolerance is a deliberate v1
+  simplification -- cheap to reason about since positions are already
+  cell-quantized.
+- **Not built this session** (real, deliberate v1 cut): after a word/line
+  click, dragging (without releasing) falls through to ordinary per-cell
+  extension from that word/line's boundary, not kitty's own word-wise/
+  line-wise drag-extend behavior. The initial multi-click selection itself
+  is correct; extending it by dragging isn't multi-click-aware. Not
+  attempted -- would need a persistent "selection mode" (char/word/line)
+  threaded through the whole drag, a real bigger change than this pass's
+  scope.
+- **Verified**: full suite green (336 passed, 9 new — `test_screen.py`
+  word/line-select model tests incl. punctuation-set and whitespace-click
+  cases, `test_render_input_state.py` click-count timing/cell-reset tests
+  via the new fake-clock fixture); a fresh `timeout 4 python -m
+  puppy.render.app` live run still starts and shows up correctly in `niri
+  msg windows` with no crash/traceback. Not yet interactively confirmed
+  with a real double/triple click.
+
 ## Current status (2026-08-31, scrollback view)
 
 **Scrollback UI (mouse-wheel-into-history) built — the last of the three
@@ -1293,6 +1338,16 @@ with the date when something is confirmed working (not just "code exists").
       interactively confirmed with a real mouse wheel. This completes all
       three "daily-driver basics" items flagged on 2026-08-24 (cursor,
       selection, scrollback view).
+- [x] **Double-click word-select / triple-click line-select — 2026-08-31.**
+      `Screen.select_word`/`select_line`, word-character set matching
+      kitty's real `select_by_word_characters` default. `InputState` click-
+      counting via a new injectable `clock` param (`_CLICK_INTERVAL` 0.5s,
+      kitty's real default). See the "Current status (2026-08-31,
+      double/triple-click select)" entry above for full detail. 9 new tests
+      (336 total, up from 327). Live smoke-tested (no crash, window opens
+      correctly), not yet interactively confirmed. Real, documented v1 cut:
+      dragging after a word/line click isn't multi-click-aware (falls back
+      to ordinary per-cell extension).
 
 ## File map
 
@@ -1358,24 +1413,24 @@ dependencies live there, not in system Python. `pip install -e .` again if the v
 is ever recreated (it's gitignored).
 
 **Nothing is mid-flight; there is no unfinished code to pick back up.** Everything
-through the 2026-08-31 scrollback-view pass (see the "Current status (2026-08-31,
-scrollback view)" entry above for full detail) is real, committed, pushed,
-test-covered (327 passing), and smoke-tested live. Three things from recent
-sessions are real but still only smoke-tested, not yet interactively/visually
-confirmed by a human: the visible cursor (needs a theme with real cursor/bg
-contrast — see the cursor entry below for which one), text selection, and
-scrollback view (the latter two both need an actual human driving a real mouse
-drag/wheel in a live window, not simulated from here).
+through the 2026-08-31 double/triple-click pass (see the "Current status
+(2026-08-31, double/triple-click select)" entry above for full detail) is real,
+committed, pushed, test-covered (336 passing), and smoke-tested live. Four
+things from recent sessions are real but still only smoke-tested, not yet
+interactively/visually confirmed by a human: the visible cursor (needs a theme
+with real cursor/bg contrast — see the cursor entry below for which one), text
+selection, scrollback view, and double/triple-click (the latter three all need
+an actual human driving a real mouse in a live window, not simulated from
+here) — genuinely worth prioritizing a real interactive pass over more new
+features at this point, four smoke-tested-only passes in a row is a lot to
+have unverified at once.
 
-**All three of the "daily-driver basics" items from 2026-08-24 (visible
-cursor, text selection, scrollback view) are now built.** Ask the user what's
-next before picking a direction — real candidates, none picked unilaterally:
-kitty-graphics completeness (`a=p`/`a=d`/`a=q`, z-index, animation), a config
-file (font size/theme/keybinds are still hardcoded in `app.py`), double-
-click/triple-click select, tabs/splits, Sixel, or just getting a human to
-interactively confirm the three basics above actually work right in a live
-window (arguably overdue, given how much has shipped smoke-tested-only in a
-row).
+**All three of the "daily-driver basics" items from 2026-08-24, plus
+double/triple-click select, are now built.** Ask the user what's next before
+picking a direction — real candidates, none picked unilaterally: kitty-graphics
+completeness (`a=p`/`a=d`/`a=q`, z-index, animation), a config file (font
+size/theme/keybinds are still hardcoded in `app.py`), tabs/splits, Sixel, or a
+real interactive confirmation pass on everything shipped today (see above).
 
 ### 2026-08-24 session recap (second live user bug-report pass)
 

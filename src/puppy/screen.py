@@ -321,6 +321,49 @@ class Screen:
             lines.append("".join(cell.char for cell in self.grid[row][start_col:end_col]).rstrip())
         return "\n".join(lines)
 
+    # Word-character set for double-click select: kitty's real
+    # select_by_word_characters default (confirmed against kitty's
+    # options/definition.py), plus anything Python's str.isalnum() agrees
+    # is alphanumeric -- matches kitty's own documented rule ("any
+    # character marked as an alphanumeric character in the Unicode
+    # database" in addition to this literal set).
+    _WORD_PUNCTUATION = set("@-./_~?&=%+#")
+
+    def _is_word_char(self, ch: str) -> bool:
+        return ch.isalnum() or ch in self._WORD_PUNCTUATION
+
+    def select_word(self, row: int, col: int) -> None:
+        """Double-click word-select. Confined to a single row -- words
+        don't span line wraps in this v1, a real deliberate cut (matching
+        selected_text()/cell_selected() already being main-screen-grid-only,
+        not a new kind of scope reduction). Clicking on a non-word
+        character (whitespace, or anything outside the word-character set)
+        deliberately selects nothing rather than guessing at a whitespace-
+        run convention kitty itself also treats as a separate, more complex
+        rule -- a real, documented gap, not an oversight."""
+        row = max(0, min(self.rows - 1, row))
+        col = max(0, min(self.cols - 1, col))
+        line = self.grid[row]
+        if not self._is_word_char(line[col].char):
+            self.clear_selection()
+            return
+        start = col
+        while start > 0 and self._is_word_char(line[start - 1].char):
+            start -= 1
+        end = col
+        while end < self.cols - 1 and self._is_word_char(line[end + 1].char):
+            end += 1
+        self.start_selection(row, start)
+        self.update_selection(row, end)
+
+    def select_line(self, row: int) -> None:
+        """Triple-click line-select -- the full row, column 0 through the
+        last column (selected_text()'s existing per-line rstrip already
+        trims whatever trailing blank cells that includes)."""
+        row = max(0, min(self.rows - 1, row))
+        self.start_selection(row, 0)
+        self.update_selection(row, self.cols - 1)
+
     # --- scrollback view (viewport into history, not the history itself) ---
 
     def scroll_view(self, lines: int) -> None:
