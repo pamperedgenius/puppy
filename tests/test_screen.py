@@ -1,4 +1,4 @@
-from puppy.screen import Screen
+from puppy.screen import Cell, Screen
 
 
 def test_put_char_advances_cursor():
@@ -640,3 +640,105 @@ def test_mouse_reporting_active_requires_sgr_and_a_tracking_mode():
     assert s.mouse_reporting_active is True
     s.set_private_mode(1000, False)
     assert s.mouse_reporting_active is False  # no tracking mode left
+
+
+# --- scrollback view ---
+
+
+def _fill_row(screen, row, text):
+    for i, ch in enumerate(text):
+        screen.grid[row][i].char = ch
+
+
+def test_visible_rows_is_the_live_grid_at_zero_offset():
+    s = Screen(rows=2, cols=5)
+    _fill_row(s, 0, "aaaaa")
+    _fill_row(s, 1, "bbbbb")
+    assert s.visible_rows() is s.grid
+
+
+def test_scroll_view_up_shows_scrollback_lines():
+    s = Screen(rows=2, cols=3, scrollback_limit=10)
+    s.scrollback.append([Cell(char=ch) for ch in "one"])
+    s.scrollback.append([Cell(char=ch) for ch in "two"])
+    _fill_row(s, 0, "thr")
+    _fill_row(s, 1, "liv")
+    s.scroll_view(1)
+    assert s.scrolled_back is True
+    rows_text = ["".join(c.char for c in row).rstrip() for row in s.visible_rows()]
+    assert rows_text == ["two", "thr"]
+    s.scroll_view(1)
+    rows_text = ["".join(c.char for c in row).rstrip() for row in s.visible_rows()]
+    assert rows_text == ["one", "two"]
+
+
+def test_scroll_view_clamped_to_available_history():
+    s = Screen(rows=2, cols=3, scrollback_limit=10)
+    _fill_row(s, 0, "abc")
+    s.cursor_position(2, 1)
+    s.linefeed()  # one line of real scrollback
+    s.scroll_view(50)
+    assert s.scroll_offset == 1
+    s.scroll_view(-50)
+    assert s.scroll_offset == 0
+    assert s.scrolled_back is False
+
+
+def test_reset_scroll_view():
+    s = Screen(rows=2, cols=3, scrollback_limit=10)
+    _fill_row(s, 0, "abc")
+    s.cursor_position(2, 1)
+    s.linefeed()
+    s.scroll_view(1)
+    s.reset_scroll_view()
+    assert s.scroll_offset == 0
+    assert s.visible_rows() is s.grid
+
+
+def test_resize_resets_scroll_view():
+    s = Screen(rows=2, cols=3, scrollback_limit=10)
+    _fill_row(s, 0, "abc")
+    s.cursor_position(2, 1)
+    s.linefeed()
+    s.scroll_view(1)
+    assert s.scroll_offset == 1
+    s.resize(3, 3)
+    assert s.scroll_offset == 0
+
+
+def test_alt_screen_enter_and_exit_reset_scroll_view():
+    # scroll_view() itself isn't alt-screen-aware (same design as
+    # start_selection -- the real screen.in_alt_screen gate lives in
+    # InputState, see test_render_input_state.py's
+    # test_scroll_on_alt_screen_is_reported_not_local); this only checks
+    # that the enter/exit transitions themselves reset any leftover offset.
+    s = Screen(rows=2, cols=3, scrollback_limit=10)
+    _fill_row(s, 0, "abc")
+    s.cursor_position(2, 1)
+    s.linefeed()
+    s.scroll_view(1)
+    assert s.scroll_offset == 1
+    s.enter_alt_screen()
+    assert s.scroll_offset == 0
+    s.exit_alt_screen()
+    assert s.scroll_offset == 0
+
+
+def test_visible_rows_reclamps_after_scrollback_shrinks():
+    s = Screen(rows=2, cols=3, scrollback_limit=10)
+    _fill_row(s, 0, "abc")
+    s.cursor_position(2, 1)
+    s.linefeed()
+    s.scroll_view(1)
+    s.erase_in_display(3)  # clears scrollback out from under an active scroll_offset
+    rows = s.visible_rows()  # must not raise / index negatively
+    assert len(rows) == 2
+
+
+def test_in_alt_screen_property():
+    s = Screen()
+    assert s.in_alt_screen is False
+    s.enter_alt_screen()
+    assert s.in_alt_screen is True
+    s.exit_alt_screen()
+    assert s.in_alt_screen is False

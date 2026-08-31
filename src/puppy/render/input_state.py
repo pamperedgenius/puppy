@@ -31,6 +31,18 @@ doesn't double-deliver a click it's handling itself. See screen.py's
 selection methods for the model half; copy_to_clipboard (constructor-
 injected, no-op default -- same pattern as Screen.write_back) is called once,
 on release, with the finished selection's text.
+
+Scrollback-view note: wheel scroll follows the exact same
+"local-vs-forwarded" split as selection -- `screen.mouse_reporting_active`
+gates whether a wheel event moves puppy's own viewport into history
+(`Screen.scroll_view`) or gets reported to the program as a real SCROLL_UP/
+SCROLL_DOWN button event, and it's additionally suppressed on the alt screen
+(`screen.in_alt_screen`) since vim/less/htop already scroll themselves --
+forwarding *and* locally scrolling would be double behavior. Unlike
+selection there's no Shift override here: real terminals don't have one for
+wheel scroll (Shift-scroll on kitty/xterm answers to a *different* real
+convention -- fast/inverse scroll -- puppy doesn't implement, not simulated
+here).
 """
 from __future__ import annotations
 
@@ -49,6 +61,7 @@ _GLFW_BUTTON_MAP = {
 }
 
 _DECCKM_MODE = 1
+_WHEEL_SCROLL_MULTIPLIER = 5  # kitty's real wheel_scroll_multiplier default
 
 
 class InputState:
@@ -72,10 +85,14 @@ class InputState:
     def on_key(self, key: int, scancode: int, action: int, mods: int) -> None:
         self.current_mods = mods
         if action == glfw.PRESS:
-            # Typing deselects, matching every real terminal -- a stale
-            # selection sitting under text a program just overwrote would be
-            # actively misleading, not just cosmetic.
+            # Typing deselects and snaps back to the live bottom, matching
+            # every real terminal -- a stale selection sitting under text a
+            # program just overwrote, or typing into a program while looking
+            # at history, would both be actively misleading, not just
+            # cosmetic. The keystroke itself still gets sent normally below,
+            # same as a real terminal exiting scrollback on any keypress.
             self.screen.clear_selection()
+            self.screen.reset_scroll_view()
         if self.screen.key_encoding_flags:
             data = encode_kitty_key_event(key, action, mods, self.screen.key_encoding_flags)
             if data:
@@ -100,7 +117,16 @@ class InputState:
             return  # extra/side buttons not mapped yet, documented gap
         if mb is MouseButton.LEFT and action == glfw.PRESS:
             shift = bool(mods & glfw.MOD_SHIFT)
-            if shift or not self.screen.mouse_reporting_active:
+            # Selection coordinates are always interpreted against the live
+            # grid (Screen.cell_selected/selected_text never consult
+            # visible_rows()) -- starting one while scrolled_back would
+            # silently select/copy whatever's really at those row/col
+            # positions in the live grid, not the scrollback content the
+            # user can actually see (which is also never rendered as
+            # selected either, see build_instances' viewing_live gate) --
+            # so it's blocked here rather than shipped as an invisible,
+            # copy-the-wrong-thing footgun.
+            if (shift or not self.screen.mouse_reporting_active) and not self.screen.scrolled_back:
                 self.selecting = True
                 self.pressed_button = mb
                 self.screen.start_selection(self.last_row, self.last_col)
@@ -131,6 +157,20 @@ class InputState:
 
     def on_scroll(self, xoffset: float, yoffset: float) -> None:
         if yoffset == 0:
+            return
+        if not self.screen.mouse_reporting_active and not self.screen.in_alt_screen:
+            # kitty's real wheel_scroll_multiplier default is 5.0 lines per
+            # low-precision wheel notch (confirmed against kitty's own
+            # options/definition.py) -- ported as a flat multiplier here.
+            # Real, documented gap: kitty additionally branches on
+            # high-precision scrolling devices (trackpads, and wheel mice on
+            # Wayland/macOS specifically), scrolling proportional to the raw
+            # pixel delta instead of this fixed per-notch amount -- GLFW's
+            # yoffset here doesn't expose that distinction, and puppy doesn't
+            # attempt to infer it, so every device scrolls at this same flat
+            # rate.
+            lines = max(1, round(abs(yoffset) * _WHEEL_SCROLL_MULTIPLIER))
+            self.screen.scroll_view(lines if yoffset > 0 else -lines)
             return
         button = MouseButton.SCROLL_UP if yoffset > 0 else MouseButton.SCROLL_DOWN
         self._report(MouseAction.PRESS, button)

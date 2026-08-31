@@ -103,7 +103,14 @@ def build_instances(
     Screen, which would otherwise silently paint over cell (0, 0) in tests
     that never asked for a cursor)."""
     instances = np.zeros(screen.rows * screen.cols, dtype=INSTANCE_DTYPE)
-    cursor_shape = screen.cursor_shape if show_cursor else "none"
+    # Scrolled-back view: cursor and selection are both main-screen-grid
+    # concepts (their stored coordinates mean nothing once visible_rows()
+    # is showing scrollback content at those same row indices instead), so
+    # both are suppressed while scrolled_back is true -- matches real
+    # terminals, which hide the cursor and any selection while you're
+    # looking at history.
+    viewing_live = not screen.scrolled_back
+    cursor_shape = screen.cursor_shape if (show_cursor and viewing_live) else "none"
     # Screen.put_char lets cursor_col reach exactly screen.cols right after
     # filling the last column (a deferred-wrap state -- the actual wrap only
     # happens on the *next* write, matching real terminal behavior). Clamp
@@ -116,9 +123,9 @@ def build_instances(
     # no-selection Screen (the overwhelmingly common case), so this keeps the
     # per-cell loop's cost identical to before selection existed whenever
     # there's nothing to highlight.
-    show_selection = screen.has_selection()
+    show_selection = viewing_live and screen.has_selection()
     idx = 0
-    for row_idx, row in enumerate(screen.grid):
+    for row_idx, row in enumerate(screen.visible_rows()):
         for col_idx, cell in enumerate(row):
             glyph_id = font.glyph_id_for_char(cell.char, bold=cell.bold)
             bitmap = font.rasterize(glyph_id, bold=cell.bold)

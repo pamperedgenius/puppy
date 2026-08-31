@@ -123,6 +123,15 @@ class Screen:
         # direction themselves.
         self.selection_start: tuple[int, int] | None = None
         self.selection_end: tuple[int, int] | None = None
+        # Scrollback *view*: how many lines back from the live bottom the
+        # viewport is currently showing (0 = live grid, the overwhelmingly
+        # common state). Independent of self.scrollback itself (the actual
+        # captured history) -- this is just "where is the camera pointed."
+        # Only meaningful for the main screen; alt-screen apps (vim/less/
+        # htop) scroll themselves and never touch this (InputState is
+        # expected to check Screen.in_alt_screen before calling scroll_view,
+        # same convention as mouse_reporting_active).
+        self.scroll_offset = 0
 
     def graphics_command(self, control: dict[str, str], payload: bytes) -> None:
         self.graphics.handle_command(control, payload, self.cursor_row, self.cursor_col)
@@ -216,6 +225,10 @@ class Screen:
         holding Shift always forces local selection regardless of this."""
         return 1006 in self.private_modes and bool(self.private_modes & {1000, 1002, 1003})
 
+    @property
+    def in_alt_screen(self) -> bool:
+        return self._alt_active
+
     # --- OSC family ---
 
     def set_window_title(self, title: str) -> None:
@@ -308,6 +321,48 @@ class Screen:
             lines.append("".join(cell.char for cell in self.grid[row][start_col:end_col]).rstrip())
         return "\n".join(lines)
 
+    # --- scrollback view (viewport into history, not the history itself) ---
+
+    def scroll_view(self, lines: int) -> None:
+        """Positive scrolls up (back into history), negative scrolls down
+        (toward the live bottom). Clamped to [0, len(scrollback)] here (not
+        just at render time) so scroll_offset itself is always a valid,
+        immediately-consultable value -- e.g. the scrolled_back property
+        below. Callers (InputState.on_scroll) are expected to check
+        in_alt_screen/mouse_reporting_active first, matching how selection's
+        start_selection isn't itself mode-gated -- but calling this
+        unconditionally is still safe, it just clamps to a no-op at 0 when
+        there's no real scrollback."""
+        self.scroll_offset = max(0, min(len(self.scrollback), self.scroll_offset + lines))
+
+    def reset_scroll_view(self) -> None:
+        self.scroll_offset = 0
+
+    @property
+    def scrolled_back(self) -> bool:
+        return self.scroll_offset > 0
+
+    def visible_rows(self) -> list[list[Cell]]:
+        """The `self.rows` rows that should actually be rendered right now.
+
+        At scroll_offset 0 (the overwhelmingly common case) this is just
+        self.grid, unchanged. Otherwise it's a window into
+        scrollback+grid -- combined always has exactly len(scrollback)+rows
+        elements (grid always has exactly `rows` rows), so
+        combined[start:start+rows] is always in-bounds for any scroll_offset
+        clamped to [0, len(scrollback)], no top-padding logic needed.
+        Re-clamps scroll_offset against the *current* scrollback length
+        (not just what it was when last set via scroll_view) so a shrunk
+        scrollback -- e.g. `CSI 3 J`/erase_in_display mode 3 clearing it --
+        can never produce an out-of-range slice.
+        """
+        offset = min(self.scroll_offset, len(self.scrollback))
+        if offset == 0:
+            return self.grid
+        combined = list(self.scrollback) + self.grid
+        start = len(self.scrollback) - offset
+        return combined[start:start + self.rows]
+
     @staticmethod
     def _default_sgr() -> dict:
         return dict(fg=None, bg=None, bold=False, underline=False, reverse=False)
@@ -340,6 +395,12 @@ class Screen:
         # simplest correct behavior, matching real terminals, is to just drop
         # the selection rather than try to remap it.
         self.clear_selection()
+        # scroll_offset (a *count* of lines, not coordinates) stays technically
+        # valid across a resize (visible_rows() re-clamps it anyway), but a
+        # different row count changes what a given offset would even show --
+        # simplest correct behavior is snapping back to live, same reasoning
+        # as the selection drop just above.
+        self.reset_scroll_view()
 
     # --- cursor save/restore (DECSC/DECRC, ESC 7/8) ---
 
@@ -367,8 +428,12 @@ class Screen:
         self.cursor_col = 0
         # A main-screen selection has nothing meaningful to point at once the
         # alt-screen app (vim/less/htop) takes over the grid -- matches real
-        # terminals, which deselect on this same transition.
+        # terminals, which deselect on this same transition. Scrollback view
+        # resets for the same reason: it's a main-screen concept, and the
+        # alt-screen grid that's about to be shown has nothing to do with
+        # scroll_offset's meaning.
         self.clear_selection()
+        self.reset_scroll_view()
 
     def exit_alt_screen(self, save_cursor: bool = True) -> None:
         if not self._alt_active:
@@ -380,6 +445,7 @@ class Screen:
         if save_cursor:
             self.restore_cursor()
         self.clear_selection()
+        self.reset_scroll_view()
 
     # --- writing text ---
 

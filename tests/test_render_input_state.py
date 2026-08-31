@@ -201,3 +201,65 @@ def test_typing_clears_an_active_selection(state_with_clipboard):
     assert state.screen.has_selection() is True
     state.on_key(glfw.KEY_A, 0, glfw.PRESS, 0)
     assert state.screen.has_selection() is False
+
+
+# --- scrollback view ---
+
+
+def _make_scrollback(screen, lines):
+    for line in lines:
+        for i, ch in enumerate(line):
+            screen.grid[0][i].char = ch
+        screen.cursor_position(screen.rows, 1)  # bottom row -- linefeed there scrolls
+        screen.linefeed()
+
+
+def test_scroll_with_no_mouse_mode_moves_the_view_not_reported():
+    screen = Screen(rows=2, cols=5)
+    _make_scrollback(screen, ["one", "two", "thr"])
+    session = _StubSession()
+    state = InputState(session, screen, _StubFont())
+    state.on_scroll(0, 1.0)
+    assert screen.scrolled_back is True
+    assert session.writes == []
+
+
+def test_scroll_with_mouse_mode_enabled_is_reported_not_local(state):
+    state.screen.set_private_mode(1000, True)
+    state.screen.set_private_mode(1006, True)
+    state.on_scroll(0, 1.0)
+    assert state.screen.scrolled_back is False
+    assert state.session.writes[-1] == b"\x1b[<64;1;1M"
+
+
+def test_scroll_on_alt_screen_is_reported_not_local():
+    screen = Screen(rows=2, cols=5)
+    screen.enter_alt_screen()
+    screen.set_private_mode(1000, True)
+    screen.set_private_mode(1006, True)
+    session = _StubSession()
+    state = InputState(session, screen, _StubFont())
+    state.on_scroll(0, 1.0)
+    assert screen.scrolled_back is False
+    assert session.writes  # forwarded as a real mouse report
+
+
+def test_typing_resets_scroll_view(state_with_clipboard):
+    state, _ = state_with_clipboard
+    _make_scrollback(state.screen, ["one", "two", "thr"])
+    state.screen.scroll_view(1)
+    assert state.screen.scrolled_back is True
+    state.on_key(glfw.KEY_A, 0, glfw.PRESS, 0)
+    assert state.screen.scrolled_back is False
+
+
+def test_left_click_while_scrolled_back_does_not_start_a_selection(state_with_clipboard):
+    # Regression: selection coordinates always address the live grid, not
+    # whatever visible_rows() is currently showing -- starting one while
+    # scrolled back would silently select/copy the wrong content.
+    state, _ = state_with_clipboard
+    _make_scrollback(state.screen, ["one", "two", "thr"])
+    state.screen.scroll_view(1)
+    state.on_mouse_button(glfw.MOUSE_BUTTON_LEFT, glfw.PRESS, 0)
+    assert state.selecting is False
+    assert state.screen.has_selection() is False

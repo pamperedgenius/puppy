@@ -225,3 +225,43 @@ def test_build_instances_block_cursor_wins_over_selection_on_the_same_cell(font,
     # the other selected cell (0,1) still gets the selection colors
     assert list(instances[1]["fg"]) == list(srgb_color(1, 2, 3))
     assert list(instances[1]["bg"]) == list(srgb_color(4, 5, 6))
+
+
+def _atlas_slot_for(font, atlas, ch):
+    glyph_id = font.glyph_id_for_char(ch, bold=False)
+    return atlas.get_or_add((glyph_id, False), font.rasterize(glyph_id, bold=False))
+
+
+def test_build_instances_renders_scrollback_when_scrolled_back(font, atlas):
+    screen = Screen(rows=1, cols=3, scrollback_limit=10)
+    for i, ch in enumerate("abc"):
+        screen.grid[0][i].char = ch
+    screen.cursor_position(1, 1)
+    screen.linefeed()  # "abc" -> scrollback, grid now blank
+    for i, ch in enumerate("xyz"):
+        screen.grid[0][i].char = ch
+    instances = build_instances(screen, font, atlas)  # scroll_offset == 0: live grid
+    live_slot = _atlas_slot_for(font, atlas, "x")
+    assert (instances[0]["atlas_col"], instances[0]["atlas_row"]) == (live_slot.col, live_slot.row)
+    screen.scroll_view(1)
+    instances = build_instances(screen, font, atlas)
+    back_slot = _atlas_slot_for(font, atlas, "a")
+    assert (instances[0]["atlas_col"], instances[0]["atlas_row"]) == (back_slot.col, back_slot.row)
+
+
+def test_build_instances_suppresses_cursor_and_selection_while_scrolled_back(font, atlas):
+    screen = Screen(rows=1, cols=3, scrollback_limit=10)
+    screen.put_char("a")
+    screen.cursor_position(1, 1)
+    screen.linefeed()  # real scrollback line to scroll into
+    screen.start_selection(0, 0)
+    screen.update_selection(0, 1)
+    screen.scroll_view(1)
+    instances = build_instances(
+        screen, font, atlas,
+        show_cursor=True, cursor_color=(9, 9, 9), cursor_text_color=(8, 8, 8),
+        selection_fg=(1, 2, 3), selection_bg=(4, 5, 6),
+    )
+    for cell in instances:
+        assert list(cell["cursor"]) == [0.0, 0.0, 0.0, 0.0]
+        assert list(cell["fg"]) != list(srgb_color(1, 2, 3))
