@@ -547,3 +547,96 @@ def test_device_attribute_reports_default_to_noop_when_no_write_back_given():
     s = Screen()
     s.report_primary_device_attributes()  # must not raise
     s.report_secondary_device_attributes()  # must not raise
+
+
+# --- text selection ---
+
+
+def test_plain_click_with_no_drag_is_not_a_selection():
+    s = Screen(rows=5, cols=10)
+    s.start_selection(1, 2)
+    assert s.has_selection() is False
+    assert s.selected_text() == ""
+
+
+def test_drag_selects_within_one_line():
+    s = Screen(rows=5, cols=10)
+    for i, ch in enumerate("hello world"[:10]):
+        s.grid[1][i].char = ch
+    s.start_selection(1, 0)
+    s.update_selection(1, 4)
+    assert s.has_selection() is True
+    assert s.selected_text() == "hello"
+
+
+def test_drag_selects_across_multiple_lines():
+    s = Screen(rows=3, cols=5)
+    for i, ch in enumerate("abcde"):
+        s.grid[0][i].char = ch
+    for i, ch in enumerate("fghij"):
+        s.grid[1][i].char = ch
+    s.start_selection(0, 3)
+    s.update_selection(1, 1)
+    assert s.selected_text() == "de\nfg"
+
+
+def test_selection_normalizes_a_backward_drag():
+    s = Screen(rows=5, cols=10)
+    for i, ch in enumerate("hello"):
+        s.grid[0][i].char = ch
+    s.start_selection(0, 4)
+    s.update_selection(0, 0)  # dragged right-to-left
+    assert s.selected_text() == "hello"
+
+
+def test_cell_selected_matches_selected_text_range():
+    s = Screen(rows=3, cols=5)
+    s.start_selection(0, 2)
+    s.update_selection(1, 1)
+    assert s.cell_selected(0, 1) is False
+    assert s.cell_selected(0, 2) is True
+    assert s.cell_selected(0, 4) is True
+    assert s.cell_selected(1, 0) is True
+    assert s.cell_selected(1, 1) is True
+    assert s.cell_selected(1, 2) is False
+    assert s.cell_selected(2, 0) is False
+
+
+def test_clear_selection():
+    s = Screen(rows=5, cols=10)
+    s.start_selection(0, 0)
+    s.update_selection(0, 3)
+    s.clear_selection()
+    assert s.has_selection() is False
+    assert s.cell_selected(0, 1) is False
+
+
+def test_resize_clears_a_stale_selection():
+    s = Screen(rows=5, cols=10)
+    s.start_selection(0, 0)
+    s.update_selection(3, 8)
+    s.resize(2, 4)  # old coordinates would now be out of range
+    assert s.has_selection() is False
+
+
+def test_alt_screen_enter_and_exit_clear_selection():
+    s = Screen(rows=5, cols=10)
+    s.start_selection(0, 0)
+    s.update_selection(1, 1)
+    s.enter_alt_screen()
+    assert s.has_selection() is False
+    s.start_selection(0, 0)
+    s.update_selection(1, 1)
+    s.exit_alt_screen()
+    assert s.has_selection() is False
+
+
+def test_mouse_reporting_active_requires_sgr_and_a_tracking_mode():
+    s = Screen()
+    assert s.mouse_reporting_active is False
+    s.set_private_mode(1000, True)
+    assert s.mouse_reporting_active is False  # no 1006 yet
+    s.set_private_mode(1006, True)
+    assert s.mouse_reporting_active is True
+    s.set_private_mode(1000, False)
+    assert s.mouse_reporting_active is False  # no tracking mode left

@@ -20,6 +20,7 @@ from __future__ import annotations
 import glfw
 from rendercanvas.glfw import RenderCanvas
 
+from .clipboard import copy_selection
 from .gpu import GpuContext
 
 
@@ -82,6 +83,15 @@ class Window:
 
     def poll_events(self) -> None:
         glfw.poll_events()
+
+    def copy_to_clipboard(self, text: str) -> None:
+        """Best-effort copy of a terminal-native text selection to the system
+        clipboard -- see clipboard.py's module docstring for the two targets
+        (CLIPBOARD via GLFW, PRIMARY via wl-copy) and why both exist. Kept
+        here rather than called directly from app.py/InputState so the GLFW
+        window handle stays encapsulated in this class, same as every other
+        GLFW-specific operation."""
+        copy_selection(self._glfw_handle, text)
 
     def close(self) -> None:
         if not self.canvas.get_closed():

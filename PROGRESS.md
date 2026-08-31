@@ -74,7 +74,106 @@ found because writing an honest terminfo entry (which has a `bce` capability fla
 forced the question "do we actually do this?" Worth treating protocol/terminfo work
 as a trigger for another verification pass, not just a one-time audit.
 
-## Current status (2026-08-31)
+## Current status (2026-08-31, text selection)
+
+**Text selection (click-drag, copy) built — the user's explicit pick when
+asked which "daily-driver basics" item to do next (the other options offered
+were scrollback UI, kitty-graphics completeness, or just visually confirming
+the already-built cursor). 312 tests passing (up from 292), 20 new. No GPU/
+shader changes needed at all — selection highlighting reuses the exact same
+"just recolor this cell's fg/bg before upload" technique the block cursor
+already established, not a new rendering path.**
+
+- **`Screen`** (`screen.py`): `selection_start`/`selection_end` ((row, col)
+  drag anchors, main-screen grid only — v1 deliberately doesn't select into
+  scrollback, since there's no scrollback UI to select *from* yet, see the
+  still-open item below) + `start_selection()`/`update_selection()`/
+  `clear_selection()`/`has_selection()`/`cell_selected(row, col)`/
+  `selected_text()`. `has_selection()` is deliberately False for a same-cell
+  click with no drag (`start == end`) — matches every real terminal: a plain
+  click positions/deselects, it doesn't select the one cell under the
+  pointer. `cell_selected()` is inclusive of both the start and end cell
+  (the cell under the pointer during a drag reads as selected, matching real
+  visual feedback), normalized via a new `_selection_bounds()` helper so
+  callers never reason about drag direction (dragging right-to-left or
+  bottom-to-top just works). `selected_text()` rstrips each line, matching
+  `dump_text()`/`scrollback_text()`'s existing convention. New
+  `mouse_reporting_active` property (`1006 in private_modes and bool(
+  private_modes & {1000, 1002, 1003})`) — same generic-private-mode-set
+  pattern `bracketed_paste`/`focus_tracking`/`sync_output_pending` already
+  use. Selection is cleared on `resize()` (stale coordinates would point
+  outside the new grid), and on both `enter_alt_screen()`/`exit_alt_screen()`
+  (a vim/less/htop taking over the grid has nothing left for a main-screen
+  selection to point at — real terminals deselect on this same transition).
+- **`InputState`** (`input_state.py`): a left-button press decides once,
+  at press time, whether this drag is a local selection or gets forwarded to
+  the program as a mouse report — `screen.mouse_reporting_active` gates it,
+  *unless* Shift is held, which always forces local selection regardless
+  (real xterm/kitty convention, confirmed against kitty's own docs, not
+  assumed). A press that starts a selection never also emits a mouse report
+  for the same press/release, matching how a real terminal doesn't
+  double-deliver a click it's handling itself. `on_cursor_pos` calls
+  `screen.update_selection()` instead of reporting DRAG while `self.
+  selecting` is true. `on_key` clears any active selection on every real
+  key press (not repeat/release) — typing over a stale selection would be
+  actively misleading, not just cosmetic. New constructor param
+  `copy_to_clipboard: Callable[[str], None] | None = None` (no-op default —
+  same injection pattern as `Screen.write_back`), called once on release
+  with `screen.selected_text()` if `has_selection()` is true.
+- **`theme.py`**: `Theme.selection_fg`/`selection_bg`, parsed from
+  `kitty-colors.conf`'s real `selection_foreground`/`selection_background`
+  keys (confirmed present in both `midnight2` and `focusedpanic`'s real
+  files). Falls back to kitty's own real stock defaults (`#000000`/
+  `#fffacd`, confirmed against kitty's `options/definition.py`) when a theme
+  doesn't set them, rather than inventing new placeholder values.
+- **Rendering** (`app.py`'s `build_instances()`): a selected cell's fg/bg is
+  overridden to the selection colors as a flat replacement (not a blend),
+  matching kitty's real `selection_foreground`/`selection_background`
+  semantics — computed after any `cell.reverse` swap so selection always
+  wins over reverse video, but *before* the cursor-cell check, so a block
+  cursor sitting on a selected cell still shows cursor colors, not selection
+  colors (matches real terminal behavior: the cursor is drawn on top of
+  everything). `show_selection = screen.has_selection()` is computed once
+  per frame outside the per-cell loop, not per-cell — on the overwhelmingly
+  common case of no active selection this keeps the loop's cost identical to
+  before the feature existed.
+- **New `render/clipboard.py`**: `copy_selection(window_handle, text)` copies
+  to two independent, both best-effort targets — CLIPBOARD via GLFW's own
+  cross-platform `glfwSetClipboardString` (portable off this machine, what a
+  real Ctrl+V paste in most apps reads from), and PRIMARY via `wl-copy -p`
+  (Wayland-specific, silently skipped if the binary is missing — matches the
+  X11/Wayland convention every other terminal on this system follows: a
+  drag-selection is immediately available for middle-click paste, no
+  explicit copy needed). GLFW has no PRIMARY-selection concept at all
+  (Windows/macOS don't have one), so that half can't go through the portable
+  path. New `Window.copy_to_clipboard(text)` wraps it, keeping the GLFW
+  handle encapsulated in `Window` like every other GLFW-specific operation;
+  `app.py`'s `run()` wires `InputState`'s `copy_to_clipboard` param to it.
+- **Not built this session** (real, deliberate v1 cuts): no double-click
+  word-select or triple-click line-select (kitty defaults both have);
+  no rectangle/block selection (kitty's Ctrl+Alt-modified select); no
+  visual scroll-while-dragging-past-the-edge; no middle-click paste (PRIMARY
+  is written so paste-elsewhere works, but puppy itself doesn't read it back
+  in); selecting is confined to the visible main-screen grid only, matching
+  the still-missing scrollback UI (see Next steps).
+- **Verified**: full suite green (312 passed, 20 new — `test_screen.py`
+  selection-model tests, `test_render_input_state.py` click/drag/shift/
+  release-copies tests, `test_render_app.py` selection-color and
+  cursor-wins-over-selection tests, `test_render_theme.py` selection-color
+  parsing + fallback tests); a fresh `timeout 5 python -m puppy.render.app`
+  live run still starts and runs the full 5 seconds with no crash/traceback
+  (only the pre-existing harmless `libdecor-gtk-WARNING`); `niri msg
+  windows` confirms the window still opens correctly (`app_id: "puppy"`).
+  **Not yet interactively confirmed** — no real mouse-drag has been driven
+  into the live window from here (would need `ydotool`/similar pointer-
+  simulation tooling, not attempted, and real click-drag-release + paste-
+  elsewhere is the kind of thing worth the user trying directly rather than
+  simulating blind). Next session, if this is still open: have the user
+  actually drag-select some text in a live `puppy` window, confirm it
+  highlights in the theme's real selection colors, and confirm a paste
+  elsewhere (Ctrl+V into another app) produces the right text.
+
+## Current status (2026-08-31, cursor)
 
 **Visible text cursor built — the user picked this explicitly from the
 "daily-driver basics" list the 2026-08-24 session left open, over extending
@@ -1070,6 +1169,17 @@ with the date when something is confirmed working (not just "code exists").
       confirmed with real contrast — the currently active theme's own cursor
       color is itself near-black against its background, unrelated to this
       code's correctness.
+- [x] **Text selection (click-drag, copy) — 2026-08-31.** `Screen.
+      start_selection`/`update_selection`/`clear_selection`/`has_selection`/
+      `cell_selected`/`selected_text`, `mouse_reporting_active` property
+      gating local-selection-vs-forwarded-mouse-report (Shift always forces
+      local selection). Highlighting reuses the block cursor's plain
+      fg/bg-recolor technique, no shader changes. Copies to both CLIPBOARD
+      (GLFW, portable) and PRIMARY (`wl-copy -p`, best-effort) via new
+      `render/clipboard.py`. See the "Current status (2026-08-31, text
+      selection)" entry above for full detail. 20 new tests (312 total, up
+      from 292). Live smoke-tested (no crash, window opens correctly), not
+      yet interactively confirmed with a real mouse drag.
 
 ## File map
 
@@ -1093,6 +1203,7 @@ puppy/
       gpu.py                 GpuContext — canvas-agnostic adapter/device/surface + clear()
       color.py                sRGB<->linear conversion (GPU wants linear, themes are sRGB)
       window.py                live GLFW window + raw input-callback registration
+      clipboard.py               copy_selection() -- CLIPBOARD via GLFW + PRIMARY via wl-copy
       font.py                   FontRenderer — HarfBuzz shape + FreeType rasterize + cache
       atlas.py                   GlyphAtlas — packs glyphs into fixed cell-sized slots
       cell_renderer.py            CellRenderer — instanced-quad WGSL draw, fg/bg compositing
@@ -1134,10 +1245,13 @@ dependencies live there, not in system Python. `pip install -e .` again if the v
 is ever recreated (it's gitignored).
 
 **Nothing is mid-flight; there is no unfinished code to pick back up.** Everything
-through the 2026-08-31 cursor pass (see the Current status entry dated 2026-08-31
-for full detail) is real, committed, pushed, test-covered (292 passing), and
-smoke-tested live (not yet visually confirmed with real contrast -- see that
-entry for why, and which theme to switch to first if that's still wanted).
+through the 2026-08-31 text-selection pass (see the "Current status (2026-08-31,
+text selection)" entry above for full detail) is real, committed, pushed,
+test-covered (312 passing), and smoke-tested live. Two things from recent
+sessions are real but still only smoke-tested, not yet interactively/visually
+confirmed by a human: the visible cursor (needs a theme with real cursor/bg
+contrast — see the cursor entry below for which one) and text selection
+(needs an actual mouse drag driven by a human, not simulated from here).
 
 ### 2026-08-24 session recap (second live user bug-report pass)
 
@@ -1173,19 +1287,23 @@ dated 2026-08-24 for full detail, and the Milestones entries below):
   beyond the existing ~1.1s/wgpu-bring-up-dominated measurement from 2026-08-20.
 
 **Picking up the "daily-driver basics" list from 2026-08-24**: the visible
-cursor (the item flagged as probably the single most conspicuous gap) is now
-done, see the 2026-08-31 Current status entry. Two of the original three
-remain, still real gaps, confirmed by reading the code not assumed:
-- **No text selection** (click-drag to select, copy). The only "selection" in the
-  codebase is OSC 52 clipboard-buffer naming (`c`/`p`/`s`), unrelated to visual
-  text-selection UI.
+cursor and text selection (click-drag, copy — see the 2026-08-31 "text
+selection" Current status entry above) are now both done. One of the
+original three remains, a real gap, confirmed by reading the code not
+assumed:
 - **No scrollback UI.** `Screen` stores scrollback (`deque(maxlen=2000)`) but
   nothing lets a user actually view it — `input_state.py`'s `on_scroll` only forwards
   wheel events to the child program via the mouse protocol, it doesn't move puppy's
-  own viewport into history when no program has claimed mouse reporting.
-- Also still missing entirely, lower priority than the two above: tabs/splits, any
-  config file (font size/theme/keybinds are all still hardcoded in `app.py`), Sixel,
-  most of kitty's graphics extras (`a=p`/`a=d`/`a=q`, z-index, animation), ligatures/
+  own viewport into history when no program has claimed mouse reporting. Note this
+  also bounds what selection can reach right now — `Screen.selected_text()`/
+  `cell_selected()` only look at the live main-screen grid, since there's no
+  scrolled-back viewport to select from yet; extending selection into scrollback
+  is naturally a follow-on once scrollback UI itself exists, not before.
+- Also still missing entirely, lower priority than scrollback UI: double-click
+  word-select / triple-click line-select (both real, small extensions of the
+  selection model just built, not a new subsystem), tabs/splits, any config file
+  (font size/theme/keybinds are all still hardcoded in `app.py`), Sixel, most of
+  kitty's graphics extras (`a=p`/`a=d`/`a=q`, z-index, animation), ligatures/
   complex-script shaping.
 
 Ask the user which of these to prioritize before picking a direction — don't just

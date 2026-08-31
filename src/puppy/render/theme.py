@@ -52,6 +52,14 @@ class Theme:
     # same convention most terminals fall back to.
     cursor: tuple[int, int, int] = DEFAULT_FG
     cursor_text_color: tuple[int, int, int] = DEFAULT_BG
+    # Text-selection highlight colors. Real theme-switcher themes ship both
+    # (`selection_foreground`/`selection_background` in kitty-colors.conf,
+    # confirmed present in midnight2/focusedpanic's real files) -- default to
+    # kitty's own real stock defaults (#000000 / #fffacd, confirmed against
+    # kitty/options/definition.py) when a theme doesn't set them, rather than
+    # inventing new placeholder values.
+    selection_fg: tuple[int, int, int] = (0, 0, 0)
+    selection_bg: tuple[int, int, int] = (255, 250, 205)
 
 
 def _parse_hex(spec: str) -> tuple[int, int, int] | None:
@@ -101,9 +109,19 @@ def load_theme(wallpaper_link: str = _DEFAULT_WALLPAPER_LINK) -> Theme:
     bg = _parse_hex(values.get("background", "")) or DEFAULT_BG
     cursor = _parse_hex(values.get("cursor", "")) or fg
     cursor_text_color = _parse_hex(values.get("cursor_text_color", "")) or bg
+    selection_fg = _parse_hex(values.get("selection_foreground", "")) or (0, 0, 0)
+    selection_bg = _parse_hex(values.get("selection_background", "")) or (255, 250, 205)
     ansi: dict[int, str] = {}
     for i in range(16):
         spec = values.get(f"color{i}")
         if spec is not None and _parse_hex(spec) is not None:
             ansi[i] = spec
-    return Theme(fg=fg, bg=bg, ansi=ansi, cursor=cursor, cursor_text_color=cursor_text_color)
+    return Theme(
+        fg=fg,
+        bg=bg,
+        ansi=ansi,
+        cursor=cursor,
+        cursor_text_color=cursor_text_color,
+        selection_fg=selection_fg,
+        selection_bg=selection_bg,
+    )

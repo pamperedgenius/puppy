@@ -63,6 +63,22 @@ def test_load_theme_cursor_colors_fall_back_to_fg_and_bg(tmp_path):
     assert theme.cursor_text_color == theme.bg
 
 
+def test_load_theme_parses_real_selection_colors(tmp_path):
+    colors = _SAMPLE_COLORS + "\nselection_foreground #fefefe\nselection_background #3c444b\n"
+    link = _make_theme_dir(tmp_path, "focusedpanic", colors)
+    theme = load_theme(link)
+    assert theme.selection_fg == (0xFE, 0xFE, 0xFE)
+    assert theme.selection_bg == (0x3C, 0x44, 0x4B)
+
+
+def test_load_theme_selection_colors_fall_back_to_kitty_stock_defaults(tmp_path):
+    # _SAMPLE_COLORS has no selection_foreground/selection_background keys.
+    link = _make_theme_dir(tmp_path, "midnight2", _SAMPLE_COLORS)
+    theme = load_theme(link)
+    assert theme.selection_fg == (0, 0, 0)
+    assert theme.selection_bg == (255, 250, 205)
+
+
 def test_find_active_theme_dir_resolves_symlink(tmp_path):
     link = _make_theme_dir(tmp_path, "midnight2", _SAMPLE_COLORS)
     resolved = find_active_theme_dir(link)

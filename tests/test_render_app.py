@@ -180,3 +180,48 @@ def test_build_instances_cursor_shape_none_draws_no_decoration(font, atlas):
     assert list(instances[0]["fg"]) == list(srgb_color(255, 255, 255))
     assert list(instances[0]["bg"]) == list(srgb_color(0, 0, 0))
     assert list(instances[0]["cursor"]) == [0.0, 0.0, 0.0, 0.0]
+
+
+def test_build_instances_selected_cells_use_selection_colors(font, atlas):
+    screen = Screen(rows=1, cols=3)
+    screen.put_char("a")
+    screen.put_char("b")
+    screen.put_char("c")
+    screen.start_selection(0, 0)
+    screen.update_selection(0, 1)
+    instances = build_instances(screen, font, atlas, selection_fg=(1, 2, 3), selection_bg=(4, 5, 6))
+    assert list(instances[0]["fg"]) == list(srgb_color(1, 2, 3))
+    assert list(instances[0]["bg"]) == list(srgb_color(4, 5, 6))
+    assert list(instances[1]["fg"]) == list(srgb_color(1, 2, 3))
+    assert list(instances[1]["bg"]) == list(srgb_color(4, 5, 6))
+    # cell 2 is outside the selection -- untouched default colors
+    assert list(instances[2]["fg"]) == list(srgb_color(255, 255, 255))
+    assert list(instances[2]["bg"]) == list(srgb_color(0, 0, 0))
+
+
+def test_build_instances_no_selection_leaves_colors_untouched(font, atlas):
+    screen = Screen(rows=1, cols=1)
+    screen.put_char("a")
+    instances = build_instances(screen, font, atlas, selection_fg=(1, 2, 3), selection_bg=(4, 5, 6))
+    assert list(instances[0]["fg"]) == list(srgb_color(255, 255, 255))
+    assert list(instances[0]["bg"]) == list(srgb_color(0, 0, 0))
+
+
+def test_build_instances_block_cursor_wins_over_selection_on_the_same_cell(font, atlas):
+    screen = Screen(rows=1, cols=2)
+    screen.put_char("a")
+    screen.put_char("b")
+    screen.cursor_position(1, 1)  # back to col 0
+    screen.start_selection(0, 0)
+    screen.update_selection(0, 1)
+    instances = build_instances(
+        screen, font, atlas,
+        show_cursor=True, cursor_color=(9, 9, 9), cursor_text_color=(8, 8, 8),
+        selection_fg=(1, 2, 3), selection_bg=(4, 5, 6),
+    )
+    # cursor cell (0,0): cursor colors win
+    assert list(instances[0]["bg"]) == list(srgb_color(9, 9, 9))
+    assert list(instances[0]["fg"]) == list(srgb_color(8, 8, 8))
+    # the other selected cell (0,1) still gets the selection colors
+    assert list(instances[1]["fg"]) == list(srgb_color(1, 2, 3))
+    assert list(instances[1]["bg"]) == list(srgb_color(4, 5, 6))

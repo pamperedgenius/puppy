@@ -111,6 +111,18 @@ class Screen:
         # scope). Screen.graphics_command is Parser's entry point (APC 'G'
         # commands); GraphicsManager owns the actual image/placement state.
         self.graphics = GraphicsManager()
+        # Terminal-native text selection (click-drag, not a program-driven
+        # concept -- unrelated to OSC 52's self.clipboard, which is a program
+        # *writing* to the system clipboard; this is the user *reading* the
+        # screen with the mouse). (row, col) cell coordinates, 0-indexed,
+        # main-screen grid only -- v1 deliberately doesn't support selecting
+        # into scrollback (no scrollback UI exists at all yet, see
+        # PROGRESS.md). start/end are drag anchors in the order the user
+        # dragged, not normalized -- normalization happens in
+        # _selection_bounds() so callers never have to reason about drag
+        # direction themselves.
+        self.selection_start: tuple[int, int] | None = None
+        self.selection_end: tuple[int, int] | None = None
 
     def graphics_command(self, control: dict[str, str], payload: bytes) -> None:
         self.graphics.handle_command(control, payload, self.cursor_row, self.cursor_col)
@@ -191,6 +203,19 @@ class Screen:
     def sync_output_pending(self) -> bool:
         return 2026 in self.private_modes
 
+    @property
+    def mouse_reporting_active(self) -> bool:
+        """Whether the running program has claimed the mouse: some button/
+        motion tracking mode (1000/1002/1003) *and* SGR encoding (1006, the
+        only encoding this terminal implements -- see puppy.mouse's module
+        docstring, legacy X10/UTF8 is a documented gap and would never
+        actually report anyway). Used by InputState to decide whether a
+        left-click drag should be forwarded to the program as a mouse report
+        or handled locally as a terminal-native text selection instead --
+        real xterm/kitty convention, confirmed against kitty's own docs:
+        holding Shift always forces local selection regardless of this."""
+        return 1006 in self.private_modes and bool(self.private_modes & {1000, 1002, 1003})
+
     # --- OSC family ---
 
     def set_window_title(self, title: str) -> None:
@@ -213,6 +238,75 @@ class Screen:
 
     def set_hyperlink(self, uri: str | None) -> None:
         self._active_hyperlink = uri
+
+    # --- terminal-native text selection (click-drag) ---
+
+    def start_selection(self, row: int, col: int) -> None:
+        self.selection_start = (row, col)
+        self.selection_end = (row, col)
+
+    def update_selection(self, row: int, col: int) -> None:
+        """No-op if a drag hasn't been started -- mirrors update_selection's
+        real caller (InputState.on_cursor_pos), which only calls this while
+        actively dragging."""
+        if self.selection_start is not None:
+            self.selection_end = (row, col)
+
+    def clear_selection(self) -> None:
+        self.selection_start = None
+        self.selection_end = None
+
+    def has_selection(self) -> bool:
+        """False for a plain click with no drag (start == end) -- matches
+        every real terminal: clicking once positions/deselects, it doesn't
+        "select" the single cell under the pointer."""
+        return self.selection_start is not None and self.selection_start != self.selection_end
+
+    def _selection_bounds(self) -> tuple[tuple[int, int], tuple[int, int]] | None:
+        if self.selection_start is None or self.selection_end is None:
+            return None
+        return (
+            (self.selection_start, self.selection_end)
+            if self.selection_start <= self.selection_end
+            else (self.selection_end, self.selection_start)
+        )
+
+    def cell_selected(self, row: int, col: int) -> bool:
+        """Inclusive of both the start and end cell, matching how a real
+        click-drag selection visually includes whatever cell the pointer is
+        currently over. Callers that only want to know "is there an active
+        selection at all" should check has_selection() first -- this
+        function alone doesn't distinguish a real drag from a same-cell
+        click (start == end still selects that one cell)."""
+        bounds = self._selection_bounds()
+        if bounds is None:
+            return False
+        (sr, sc), (er, ec) = bounds
+        if row < sr or row > er:
+            return False
+        if sr == er:
+            return sc <= col <= ec
+        if row == sr:
+            return col >= sc
+        if row == er:
+            return col <= ec
+        return True
+
+    def selected_text(self) -> str:
+        """Plain text of the current selection, main-screen grid only. Each
+        line is right-rstripped, matching dump_text()/scrollback_text()'s
+        existing convention (trailing blank cells shouldn't become trailing
+        spaces in copied text)."""
+        bounds = self._selection_bounds()
+        if bounds is None:
+            return ""
+        (sr, sc), (er, ec) = bounds
+        lines = []
+        for row in range(sr, er + 1):
+            start_col = sc if row == sr else 0
+            end_col = (ec + 1) if row == er else self.cols
+            lines.append("".join(cell.char for cell in self.grid[row][start_col:end_col]).rstrip())
+        return "\n".join(lines)
 
     @staticmethod
     def _default_sgr() -> dict:
@@ -241,6 +335,11 @@ class Screen:
         self.scroll_bottom = rows - 1
         self.cursor_row = min(self.cursor_row, rows - 1)
         self.cursor_col = min(self.cursor_col, cols - 1)
+        # A resize can leave old selection coordinates pointing outside the
+        # new grid (cell_selected/selected_text would index out of range) --
+        # simplest correct behavior, matching real terminals, is to just drop
+        # the selection rather than try to remap it.
+        self.clear_selection()
 
     # --- cursor save/restore (DECSC/DECRC, ESC 7/8) ---
 
@@ -266,6 +365,10 @@ class Screen:
         self.grid = self._blank_grid(self.rows, self.cols)
         self.cursor_row = 0
         self.cursor_col = 0
+        # A main-screen selection has nothing meaningful to point at once the
+        # alt-screen app (vim/less/htop) takes over the grid -- matches real
+        # terminals, which deselect on this same transition.
+        self.clear_selection()
 
     def exit_alt_screen(self, save_cursor: bool = True) -> None:
         if not self._alt_active:
@@ -276,6 +379,7 @@ class Screen:
         self._saved_main_grid = None
         if save_cursor:
             self.restore_cursor()
+        self.clear_selection()
 
     # --- writing text ---
 

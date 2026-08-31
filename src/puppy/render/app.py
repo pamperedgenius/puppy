@@ -91,6 +91,8 @@ def build_instances(
     show_cursor: bool = False,
     cursor_color: tuple[int, int, int] = DEFAULT_FG,
     cursor_text_color: tuple[int, int, int] = DEFAULT_BG,
+    selection_fg: tuple[int, int, int] = (0, 0, 0),
+    selection_bg: tuple[int, int, int] = (255, 250, 205),
 ) -> np.ndarray:
     """show_cursor gates whether *any* cursor decoration is applied this frame
     -- callers (app.py's draw_frame) are responsible for combining
@@ -110,6 +112,11 @@ def build_instances(
     # this exact state) rather than mutating Screen's own wrap-pending state.
     cursor_row = min(screen.cursor_row, screen.rows - 1)
     cursor_col = min(screen.cursor_col, screen.cols - 1)
+    # Computed once, not per-cell: has_selection() is False on every fresh/
+    # no-selection Screen (the overwhelmingly common case), so this keeps the
+    # per-cell loop's cost identical to before selection existed whenever
+    # there's nothing to highlight.
+    show_selection = screen.has_selection()
     idx = 0
     for row_idx, row in enumerate(screen.grid):
         for col_idx, cell in enumerate(row):
@@ -121,6 +128,12 @@ def build_instances(
             bg_rgb = resolve_color(cell.bg, default_bg, screen.palette)
             if cell.reverse:
                 fg_rgb, bg_rgb = bg_rgb, fg_rgb
+            if show_selection and screen.cell_selected(row_idx, col_idx):
+                # Selection colors are a flat highlight overriding whatever
+                # the cell's own fg/bg (and any reverse-video swap) were --
+                # matches kitty's real selection_foreground/
+                # selection_background semantics, not a blend on top.
+                fg_rgb, bg_rgb = selection_fg, selection_bg
 
             flags = (1.0 if cell.underline else 0.0, 0.0, 0.0, 0.0)
             cursor = (0.0, 0.0, 0.0, 0.0)
@@ -180,7 +193,7 @@ def run(rows: int = 24, cols: int = 80, pixel_size: int = 16) -> None:
         screen.set_palette_color(index, spec)
     parser = Parser(screen)
 
-    input_state = InputState(session, screen, font)
+    input_state = InputState(session, screen, font, copy_to_clipboard=window.copy_to_clipboard)
     window.set_key_handler(input_state.on_key)
     window.set_char_handler(input_state.on_char)
     window.set_mouse_button_handler(input_state.on_mouse_button)
@@ -222,6 +235,8 @@ def run(rows: int = 24, cols: int = 80, pixel_size: int = 16) -> None:
                 show_cursor=show_cursor,
                 cursor_color=theme.cursor,
                 cursor_text_color=theme.cursor_text_color,
+                selection_fg=theme.selection_fg,
+                selection_bg=theme.selection_bg,
             )
         )
         graphics_renderer.render(screen.graphics, cols=screen.cols, rows=screen.rows, cell_width=font.cell_width, cell_height=font.cell_height)

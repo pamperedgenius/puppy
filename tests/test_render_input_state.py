@@ -132,3 +132,72 @@ def test_legacy_mode_used_when_no_kitty_flags(state):
     assert state.screen.key_encoding_flags == 0
     state.on_key(glfw.KEY_UP, 0, glfw.PRESS, 0)
     assert state.session.writes == [b"\x1b[A"]  # legacy sequence, not CSI u
+
+
+# --- text selection ---
+
+
+@pytest.fixture
+def state_with_clipboard():
+    screen = Screen(rows=5, cols=10)
+    session = _StubSession()
+    copied = []
+    return InputState(session, screen, _StubFont(), copy_to_clipboard=copied.append), copied
+
+
+def test_left_click_without_mouse_mode_starts_selection_and_reports_nothing(state):
+    state.on_mouse_button(glfw.MOUSE_BUTTON_LEFT, glfw.PRESS, 0)
+    assert state.selecting is True
+    assert state.screen.selection_start == (0, 0)  # last_col/last_row default to (0, 0)
+    assert state.session.writes == []
+
+
+def test_shift_click_forces_selection_even_with_mouse_mode_enabled(state):
+    state.screen.set_private_mode(1000, True)
+    state.screen.set_private_mode(1006, True)
+    state.on_mouse_button(glfw.MOUSE_BUTTON_LEFT, glfw.PRESS, glfw.MOD_SHIFT)
+    assert state.selecting is True
+    assert state.session.writes == []  # not forwarded to the program
+
+
+def test_click_with_mouse_mode_and_no_shift_reports_normally_not_selection():
+    screen = Screen(rows=5, cols=10)
+    screen.set_private_mode(1000, True)
+    screen.set_private_mode(1006, True)
+    session = _StubSession()
+    state = InputState(session, screen, _StubFont())
+    state.on_mouse_button(glfw.MOUSE_BUTTON_LEFT, glfw.PRESS, 0)
+    assert state.selecting is False
+    assert session.writes == [b"\x1b[<0;1;1M"]
+
+
+def test_drag_updates_selection_and_release_copies_text():
+    screen = Screen(rows=5, cols=10)
+    for i, ch in enumerate("hello"):
+        screen.grid[0][i].char = ch
+    session = _StubSession()
+    copied = []
+    state = InputState(session, screen, _StubFont(), copy_to_clipboard=copied.append)
+    state.on_mouse_button(glfw.MOUSE_BUTTON_LEFT, glfw.PRESS, 0)  # presses at (0, 0)
+    state.on_cursor_pos(32.0, 0.0)  # col = 32 // 8 = 4, row = 0
+    assert screen.selection_end == (0, 4)
+    state.on_mouse_button(glfw.MOUSE_BUTTON_LEFT, glfw.RELEASE, 0)
+    assert state.selecting is False
+    assert copied == ["hello"]
+    assert session.writes == []  # never forwarded as mouse reports
+
+
+def test_release_without_drag_does_not_copy(state_with_clipboard):
+    state, copied = state_with_clipboard
+    state.on_mouse_button(glfw.MOUSE_BUTTON_LEFT, glfw.PRESS, 0)
+    state.on_mouse_button(glfw.MOUSE_BUTTON_LEFT, glfw.RELEASE, 0)
+    assert copied == []
+
+
+def test_typing_clears_an_active_selection(state_with_clipboard):
+    state, _ = state_with_clipboard
+    state.screen.start_selection(0, 0)
+    state.screen.update_selection(0, 3)
+    assert state.screen.has_selection() is True
+    state.on_key(glfw.KEY_A, 0, glfw.PRESS, 0)
+    assert state.screen.has_selection() is False
