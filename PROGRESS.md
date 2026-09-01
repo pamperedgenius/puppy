@@ -139,6 +139,60 @@ transmission (`t=f`/`t=t`/`t=s`), image-number addressing (`I=`, and delete's
 `n=`/`N=`/`r=`/`R=` variants that key off it), sub-cell pixel offsets (`X=`/`Y=` on
 put), parent-relative placements (`P=`/`Q=` on put).
 
+## Current status (2026-09-02, launch time re-profiled)
+
+Re-profiled after the graphics-completeness pass above, per the user's mid-session
+"launch time is horrendous" flag. **Headline finding: no regression from any recent
+code — the architecture-level ~1.1s number from 2026-08-20 still reproduces exactly
+(0.535s Window/wgpu bring-up + 0.300s CellRenderer shader compile + the rest ~0.27s,
+total 1.110s measured fresh this session) — but that number turns out to be the *best*
+case, not the typical one, which is why it read as an honest-but-misleading "not
+obviously broken-slow" verdict last time.**
+
+Real, reproduced variance found this session: instrumenting `Window()`'s init in
+isolation across several fresh, independent Python processes (not a warm/cached
+in-process re-run — each a brand-new interpreter), the *first* GPU-context creation in
+a burst of activity costs **~2.0s** just for adapter+device negotiation (4x the normal
+0.5s), while every subsequent one shortly after costs the normal ~0.5s — reproduced
+twice, independently, in two separate unrelated command batches. Total worst-case
+launch measured at **~2.5s**, matching "horrendous" far better than the previously
+recorded 1.1s.
+
+Two other concrete things confirmed, neither previously known:
+- **puppy renders on this laptop's integrated Intel GPU (Intel(R) Graphics ADL GT2, via
+  Vulkan), not the discrete NVIDIA RTX 3050** — `wgpu.gpu.enumerate_adapters_sync()`
+  shows the RTX 3050 is only exposed via **OpenGL**, not Vulkan, on this system (the
+  same hybrid-GPU-offload quirk already on file for Steam's CEF/ANGLE/zink issue, see
+  `project_steam_gpu_rendering_lag.md`). `GpuContext.create()` calls
+  `wgpu.gpu.request_adapter_sync(canvas=canvas)` with no `power_preference` at all;
+  explicitly passing `power_preference="high-performance"` was tried and does **not**
+  change the outcome, since wgpu-native still only sees Intel among Vulkan-capable
+  adapters — there's no Vulkan-level path to the NVIDIA GPU here at all, so this isn't
+  a one-line fix. wgpu-native's GL backend (the only way to reach the RTX 3050 on this
+  box) is the less-mature of its backends and was not tried live — untested, not
+  recommended to chase without a real comparison, given real risk of trading a slow
+  launch for a broken or *slower* render path.
+- **A large (7.2MB), actively-written, shared Mesa on-disk shader cache exists**
+  (`~/.cache/mesa_shader_cache/`, populated across many unrelated apps on this system,
+  most-recent entries only minutes old at the time of checking) and is the most likely
+  explanation for the cold/warm variance — a plausible, not confirmed, root cause:
+  puppy's compiled Vulkan shader/pipeline state is one of many entries competing for
+  cache residency, and whatever's evicted it (any of this system's many other
+  GPU-heavy apps — Steam/games, browsers, Astal's own GPU compositing) between real
+  usage sessions would make *every real-world* puppy launch pay the cold cost, not just
+  a rare one. Not root-caused further (would need actual driver-level tracing, e.g.
+  `MESA_SHADER_CACHE_DISABLE=true` A/B or `perf`, not attempted this session — time
+  went to characterizing the variance itself, which was the actually-missing piece
+  from the 2026-08-20 report).
+
+**No code changed for this finding** — same honest-report posture as 2026-08-20, but
+now with the actual worst-case number and a real, still-unconfirmed lead (shared Mesa
+shader-cache eviction) instead of just "one-time GPU bring-up cost." Concrete next
+steps, none attempted, no direction picked unilaterally: (a) confirm the shader-cache
+theory with a deliberate cold-cache A/B, (b) try wgpu-native's GL backend against the
+real NVIDIA adapter as a live experiment (uncertain payoff, real regression risk), (c)
+accept this as an environmental cost outside puppy's own code and not chase further.
+
 ## Current status (2026-08-31, config file)
 
 **A real config file built — `~/.config/puppy/config.toml`, covering the
@@ -1556,10 +1610,15 @@ through the 2026-09-02 kitty-graphics-completeness pass (see the "Current status
 test-covered (372 passing), and confirmed via a direct `Screen`-level
 integration smoke test — but not yet visually confirmed in a live window (a
 puppy instance was already running on the desktop this session; didn't touch it
-per the live-window-testing rule). **Launch time was flagged again this session
-("horrendous") and explicitly deferred** — pick this up next, it's the oldest
-open item (first measured ~1.1s, wgpu-bring-up-dominated, on 2026-08-20, never
-re-profiled since). Six things total are now real-but-only-smoke-tested, not
+per the live-window-testing rule). **Launch time was re-profiled this same
+session** (see the "Current status (2026-09-02, launch time re-profiled)" entry
+above) — real worst-case is ~2.5s, not the previously-recorded best-case ~1.1s,
+with a real, plausible but unconfirmed lead (shared Mesa shader-cache eviction
+between real usage sessions) and a confirmed dead end (the RTX 3050 isn't
+reachable via Vulkan on this system at all, only OpenGL — not a one-line
+power-preference fix). Next concrete step if this continues: a deliberate
+cold-cache A/B (`MESA_SHADER_CACHE_DISABLE=true`) to confirm or rule out that
+lead. Six things total are now real-but-only-smoke-tested, not
 yet interactively/visually confirmed by a human: the visible cursor (needs a
 theme with real cursor/bg contrast — see the cursor entry for which one), text
 selection, scrollback view, double/triple-click, config.toml's `font_size`
