@@ -11,6 +11,49 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import wgpu
+from wgpu.backends.wgpu_native.extras import set_instance_extras
+
+# Real, measured launch-time bug found and fixed here (2026-09-02). On this
+# project's dev machine (a hybrid Intel iGPU + NVIDIA dGPU laptop), a plain
+# `wgpu.gpu.request_adapter_sync()` cost ~1.7-1.8s instead of the expected
+# ~0.1-0.3s -- root-caused with strace + symbol resolution, not guessed:
+# wgpu-native's default Instance probes *every* backend (Vulkan AND GL) the
+# moment the instance is created, before any later adapter-request filtering
+# even runs. The GL/EGL probe loads NVIDIA's GLVND vendor library
+# (`libnvidia-glsi.so`) and opens `/dev/nvidia0` purely to enumerate it as a
+# candidate adapter -- and on this laptop that's enough to wake the NVIDIA GPU
+# from PCIe runtime suspend (confirmed live: `power/runtime_status` for the
+# NVIDIA PCI device flips `suspended` -> `active` at exactly this call, every
+# time), even though this project never ends up using the GL backend or the
+# NVIDIA adapter at all (confirmed via `wgpu.gpu.enumerate_adapters_sync()`:
+# NVIDIA is only reachable via OpenGL here, never Vulkan -- puppy always runs
+# on the Intel adapter via Vulkan). Five different Vulkan-loader-level env
+# vars (`VK_ICD_FILENAMES`, `VK_DRIVER_FILES`, `VK_LOADER_DRIVERS_SELECT`,
+# `VK_LOADER_LAYERS_DISABLE`, Mesa's own `NODEVICE_SELECT`) were tried first
+# and *all* failed to prevent the wake -- confirmed via `VK_LOADER_DEBUG=all`
+# that the restrictions were genuinely taking effect at the Vulkan level, yet
+# the wake still happened regardless, because the actual cause sits one layer
+# up, at wgpu-native's own Instance creation, which no Vulkan-spec env var can
+# reach. `set_instance_extras` restricts the *instance itself* (not just a
+# later adapter-request filter) to `Primary` backends (Vulkan/Metal/DX12/
+# BrowserWebGPU -- i.e. real, non-legacy graphics APIs, excluding only GL/
+# GLES), which avoids the GL/EGL probe -- and with it, the NVIDIA touch --
+# entirely. Confirmed live and repeatedly (multiple cold trials, each after a
+# real ~15s idle gap so the dGPU had genuinely re-suspended): with this set,
+# the NVIDIA PCI device's `power/runtime_status` stays `suspended` throughout
+# adapter request, and `request_adapter_sync` drops to a consistent ~0.1s. No
+# functional change -- this project never used the GL backend or the NVIDIA
+# adapter either way. Must be set before the very first
+# `request_adapter_sync`/`enumerate_adapters_sync` call in the process --
+# wgpu-native raises if its (process-global, C-level) instance already
+# exists. Set here at *module import* time rather than lazily inside
+# `create()`: several test files probe `wgpu.gpu.request_adapter_sync`
+# directly (their own `_adapter_available()` skip-check) in the same module
+# that imports `GpuContext` -- a lazy call inside `create()` would run too
+# late whenever such a probe executes first, since Python only imports this
+# module once and every one of those test files imports it (for `GpuContext`)
+# before defining/running its own probe.
+set_instance_extras(backends=["Primary"])
 
 
 @dataclass

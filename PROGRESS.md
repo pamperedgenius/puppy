@@ -139,6 +139,96 @@ transmission (`t=f`/`t=t`/`t=s`), image-number addressing (`I=`, and delete's
 `n=`/`N=`/`r=`/`R=` variants that key off it), sub-cell pixel offsets (`X=`/`Y=` on
 put), parent-relative placements (`P=`/`Q=` on put).
 
+## Current status (2026-09-02, launch time -- ROOT CAUSE FOUND AND FIXED, in-code)
+
+**Supersedes the "re-profiled" entry directly below, and this file's own prior
+"ROOT CAUSE FOUND, closed" entry that preceded this one in the same session.**
+That prior entry concluded the only fix was a system-wide NVIDIA power-management
+setting and reported the user declining it, closing the investigation as an
+accepted cost. **That conclusion was wrong** -- the user correctly pushed back
+("if ur solution to a problem in puppy is to change smth else in my system then
+the app is not being developed properly") and asked for the actual mechanism to
+be understood, with research into how other GPU apps/libraries avoid this. That
+push produced a real, in-code, zero-system-changes fix. Corrected in place here
+per this file's own "replace stale entries" rule, not left standing alongside
+the fix as a separate dead-end note.
+
+**Real root cause, now precisely nailed down at the syscall level** (`strace -k`
+with symbol resolution, not inferred): `wgpu.gpu.request_adapter_sync()`'s
+underlying `wgpuCreateInstance` call -- at *instance creation*, before any
+adapter-request filtering even runs -- unconditionally probes every backend
+wgpu-native supports, including OpenGL/EGL. That GL/EGL probe loads NVIDIA's
+GLVND vendor library (`libnvidia-glsi.so`) purely to enumerate it as a candidate
+adapter, and that library opens `/dev/nvidia0` as a side effect -- which is what
+wakes the NVIDIA GPU from PCIe runtime suspend on this hybrid Intel+NVIDIA
+laptop (confirmed live: `power/runtime_status` flips `suspended` -> `active`
+at exactly this call). All of this happens even though puppy always ends up
+running on the Intel adapter via Vulkan and never touches GL or NVIDIA for
+real work (confirmed via `enumerate_adapters_sync`: NVIDIA is only reachable
+via OpenGL here, never Vulkan).
+
+**Five Vulkan-loader-level env vars were tried first and every one failed**
+(confirmed via `VK_LOADER_DEBUG=all` that each restriction genuinely took
+effect at the Vulkan level, yet the wake still happened regardless) --
+`VK_ICD_FILENAMES`, `VK_DRIVER_FILES`, `VK_LOADER_DRIVERS_SELECT` (the specific
+fix found on a near-identical CachyOS/hybrid-GPU forum thread,
+`discuss.cachyos.org/t/dgpu-wakes-up-unnecessarily-and-causes-delay/34362` --
+same symptom, same Vulkan loader version, but their case involved the NVIDIA
+*ICD* participating, a different code path than this one), `VK_LOADER_LAYERS_DISABLE`
+(both NVIDIA's own implicit Optimus/present layers and Mesa's own
+`VkLayer_MESA_device_select`), and Mesa's `NODEVICE_SELECT`. All of them operate
+at or below the Vulkan *driver/ICD* level -- the actual cause sits one level up,
+at wgpu-native's own `Instance` creation, which probes GL/EGL entirely
+independently of any Vulkan-spec mechanism. `WGPU_BACKEND`/`WGPU_BACKEND_TYPE`
+env-var guesses were also tried; a `strings` dump of the actual shipped
+`libwgpu_native-release.so` confirmed neither is a real variable this build
+reads at all (the real one, `WGPU_BACKEND_TYPE`, was later found by reading
+wgpu-py's own `_api.py` source directly rather than guessing from general wgpu
+knowledge -- confirmed being honored via its own log line -- but even that only
+filters the *returned* adapter, not what the Instance probes at creation, so it
+didn't help either).
+
+**The actual fix: `wgpu.backends.wgpu_native.extras.set_instance_extras`**, a
+real, public, documented wgpu-py API for exactly this -- it lets a caller
+configure the wgpu-native `Instance` itself (via its `WGPUInstanceExtras`
+native extension struct) *before* it's created, including which backends it's
+allowed to probe at all. `puppy/render/gpu.py` now calls
+`set_instance_extras(backends=["Primary"])` at module import time (see the
+module's own comment for exactly why import-time, not lazily inside
+`GpuContext.create()`: several test files probe `wgpu.gpu.request_adapter_sync`
+directly in their own `_adapter_available()` skip-check, in the same module
+that imports `GpuContext` -- import-time setup guarantees it runs before any of
+those probes, since every one of those files imports this module first).
+`Primary` = Vulkan/Metal/DX12/BrowserWebGPU, i.e. every non-legacy backend
+except GL/GLES -- deliberately not hardcoded to `Vulkan`-only, since that would
+be over-fitting to this one Linux machine's specific choice rather than the
+real, portable distinction (GL is the actual problem; puppy never used it on
+any platform).
+
+**Confirmed live, repeatedly, with real ~15s idle gaps between each trial so the
+dGPU had genuinely re-suspended each time** (not just re-tested back-to-back,
+which would hide the effect): `power/runtime_status` for the NVIDIA PCI device
+stayed `suspended` through every single trial post-fix (previously flipped to
+`active` on 100% of cold trials pre-fix). `request_adapter_sync` alone dropped
+from ~1.7-1.8s to a consistent ~0.09s; the full real app-init sequence
+(imports through `GraphicsRenderer` construction, matching `run()`'s own
+sequence) measured **~1.16s total on a genuinely cold trial** -- previously the
+*best* case was ~1.1s and the worst was ~2.5s; now every trial, cold or warm,
+lands at the old best case. No functional change -- puppy never used GL or the
+NVIDIA adapter for real work either way, confirmed by every adapter-summary
+print throughout this investigation still resolving to the same Intel/Vulkan
+adapter as before.
+
+372 tests still passing after the change (the module-level `set_instance_extras`
+call is what makes the test suite pass too -- several render test files each
+independently probe `wgpu.gpu.request_adapter_sync` at collection time for
+their own GPU-availability skip check, and wgpu-native's C-level instance is a
+true process-wide singleton that raises if `set_instance_extras` is called
+after it already exists; a first attempt at a *lazy*, call-inside-`create()`
+version of this fix broke 20 of those tests for exactly that reason -- fixed by
+moving the call to module-import time instead, which this file's own "Lesson"
+sections exist to capture for next time this class of ordering bug shows up).
+
 ## Current status (2026-09-02, launch time re-profiled)
 
 Re-profiled after the graphics-completeness pass above, per the user's mid-session
@@ -1610,15 +1700,14 @@ through the 2026-09-02 kitty-graphics-completeness pass (see the "Current status
 test-covered (372 passing), and confirmed via a direct `Screen`-level
 integration smoke test — but not yet visually confirmed in a live window (a
 puppy instance was already running on the desktop this session; didn't touch it
-per the live-window-testing rule). **Launch time was re-profiled this same
-session** (see the "Current status (2026-09-02, launch time re-profiled)" entry
-above) — real worst-case is ~2.5s, not the previously-recorded best-case ~1.1s,
-with a real, plausible but unconfirmed lead (shared Mesa shader-cache eviction
-between real usage sessions) and a confirmed dead end (the RTX 3050 isn't
-reachable via Vulkan on this system at all, only OpenGL — not a one-line
-power-preference fix). Next concrete step if this continues: a deliberate
-cold-cache A/B (`MESA_SHADER_CACHE_DISABLE=true`) to confirm or rule out that
-lead. Six things total are now real-but-only-smoke-tested, not
+per the live-window-testing rule). **Launch time was also chased down and
+actually fixed this same session** (see the "Current status (2026-09-02, launch
+time -- ROOT CAUSE FOUND AND FIXED, in-code)" entry above, which supersedes two
+earlier same-session dead-end write-ups) — `puppy/render/gpu.py` now restricts
+wgpu-native's Instance to non-GL backends, which stops it from waking this
+laptop's discrete NVIDIA GPU on every launch. Real, in-code, zero system
+changes, confirmed across multiple genuinely-cold trials. Six things total are
+now real-but-only-smoke-tested, not
 yet interactively/visually confirmed by a human: the visible cursor (needs a
 theme with real cursor/bg contrast — see the cursor entry for which one), text
 selection, scrollback view, double/triple-click, config.toml's `font_size`
