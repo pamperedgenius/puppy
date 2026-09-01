@@ -134,7 +134,9 @@ class Screen:
         self.scroll_offset = 0
 
     def graphics_command(self, control: dict[str, str], payload: bytes) -> None:
-        self.graphics.handle_command(control, payload, self.cursor_row, self.cursor_col)
+        response = self.graphics.handle_command(control, payload, self.cursor_row, self.cursor_col)
+        if response is not None:
+            self._write_back(response)
 
     def set_key_encoding_flags(self, val: int, how: int = 1) -> None:
         """how: 1=set directly, 2=OR into current, 3=AND-NOT (remove) from

@@ -146,11 +146,12 @@ def test_non_direct_transmission_type_out_of_scope_ignored():
     assert 1 not in gm.images
 
 
-def test_put_action_out_of_scope_ignored_not_crashed():
+def test_put_action_referring_to_nonexistent_image_errors_not_crashes():
     gm = GraphicsManager()
-    gm.handle_command({"a": "p", "i": "1"}, b"", cursor_row=0, cursor_col=0)
+    response = gm.handle_command({"a": "p", "i": "1"}, b"", cursor_row=0, cursor_col=0)
     assert gm.images == {}
     assert gm.placements == []
+    assert response == b"\x1b_Gi=1;ENOENT:Put command refers to non-existent image with id: 1\x1b\\"
 
 
 def test_malformed_base64_payload_does_not_crash():
@@ -276,3 +277,242 @@ def test_oversized_png_dimensions_rejected(monkeypatch):
     gm = GraphicsManager()
     gm.handle_command({"a": "T", "f": "100", "i": "1"}, _b64(png_bytes), cursor_row=0, cursor_col=0)
     assert 1 not in gm.images
+
+
+# --- command responses (OK/error, quiet gating) ---
+
+
+def test_successful_transmit_and_display_responds_ok():
+    gm = GraphicsManager()
+    pixels = bytes(range(12))
+    response = gm.handle_command({"a": "T", "f": "24", "s": "2", "v": "2", "i": "7"}, _b64(pixels), cursor_row=0, cursor_col=0)
+    assert response == b"\x1b_Gi=7;OK\x1b\\"
+
+
+def test_transmit_only_still_responds_ok():
+    gm = GraphicsManager()
+    pixels = bytes(range(12))
+    response = gm.handle_command({"a": "t", "f": "24", "s": "2", "v": "2", "i": "9"}, _b64(pixels), cursor_row=0, cursor_col=0)
+    assert response == b"\x1b_Gi=9;OK\x1b\\"
+
+
+def test_failed_transmit_responds_with_error_code():
+    gm = GraphicsManager()
+    short = bytes(range(6))  # declares 2x2 RGB (needs 12 bytes)
+    response = gm.handle_command({"a": "T", "f": "24", "s": "2", "v": "2", "i": "2"}, _b64(short), cursor_row=0, cursor_col=0)
+    assert response == b"\x1b_Gi=2;EINVAL:Image dimensions 2x2 do not match data size 6\x1b\\"
+
+
+def test_response_without_image_id_is_none():
+    gm = GraphicsManager()
+    # No 's'/'v' -> rejected before a load even starts, and no 'i' either.
+    response = gm.handle_command({"a": "T", "f": "24"}, _b64(b""), cursor_row=0, cursor_col=0)
+    assert response is None
+
+
+def test_chunked_transmission_responds_only_after_final_chunk():
+    gm = GraphicsManager()
+    pixels = bytes(range(12))
+    first, second = pixels[:6], pixels[6:]
+    response = gm.handle_command(
+        {"a": "T", "f": "24", "s": "2", "v": "2", "i": "5", "m": "1"}, _b64(first), cursor_row=0, cursor_col=0
+    )
+    assert response is None
+    response = gm.handle_command({"m": "0"}, _b64(second), cursor_row=0, cursor_col=0)
+    assert response == b"\x1b_Gi=5;OK\x1b\\"
+
+
+def test_quiet_1_suppresses_ok_but_not_error():
+    gm = GraphicsManager()
+    pixels = bytes(range(12))
+    ok_response = gm.handle_command(
+        {"a": "T", "f": "24", "s": "2", "v": "2", "i": "1", "q": "1"}, _b64(pixels), cursor_row=0, cursor_col=0
+    )
+    assert ok_response is None
+    short = bytes(range(6))
+    error_response = gm.handle_command(
+        {"a": "T", "f": "24", "s": "2", "v": "2", "i": "2", "q": "1"}, _b64(short), cursor_row=0, cursor_col=0
+    )
+    assert error_response is not None and b"EINVAL" in error_response
+
+
+def test_quiet_2_suppresses_everything():
+    gm = GraphicsManager()
+    short = bytes(range(6))
+    response = gm.handle_command(
+        {"a": "T", "f": "24", "s": "2", "v": "2", "i": "2", "q": "2"}, _b64(short), cursor_row=0, cursor_col=0
+    )
+    assert response is None
+
+
+# --- a=p (put) ---
+
+
+def _transmit_only(gm: GraphicsManager, image_id: int, width: int, height: int) -> None:
+    payload = bytes((x + y) % 256 for y in range(height) for x in range(width) for _ in range(3))
+    gm.handle_command({"a": "t", "f": "24", "s": str(width), "v": str(height), "i": str(image_id)}, _b64(payload), cursor_row=0, cursor_col=0)
+
+
+def test_put_displays_a_previously_transmitted_image():
+    gm = GraphicsManager()
+    _transmit_only(gm, 1, 2, 2)
+    response = gm.handle_command({"a": "p", "i": "1"}, b"", cursor_row=3, cursor_col=4)
+    assert response == b"\x1b_Gi=1;OK\x1b\\"
+    assert len(gm.placements) == 1
+    assert gm.placements[0].row == 3 and gm.placements[0].col == 4
+
+
+def test_put_with_placement_id_and_z_index_and_explicit_cell_span():
+    gm = GraphicsManager()
+    _transmit_only(gm, 1, 4, 4)
+    response = gm.handle_command(
+        {"a": "p", "i": "1", "p": "9", "z": "-5", "c": "2", "r": "3"}, b"", cursor_row=0, cursor_col=0
+    )
+    assert response == b"\x1b_Gi=1,p=9;OK\x1b\\"
+    placement = gm.placements[0]
+    assert placement.placement_id == 9
+    assert placement.z_index == -5
+    assert placement.num_cols == 2
+    assert placement.num_rows == 3
+
+
+def test_put_with_crop_offsets():
+    gm = GraphicsManager()
+    _transmit_only(gm, 1, 10, 10)
+    gm.handle_command({"a": "p", "i": "1", "x": "2", "y": "3", "w": "4", "h": "5"}, b"", cursor_row=0, cursor_col=0)
+    placement = gm.placements[0]
+    assert (placement.src_x, placement.src_y, placement.src_width, placement.src_height) == (2, 3, 4, 5)
+
+
+def test_repeated_put_with_same_placement_id_replaces_it():
+    gm = GraphicsManager()
+    _transmit_only(gm, 1, 2, 2)
+    gm.handle_command({"a": "p", "i": "1", "p": "9"}, b"", cursor_row=0, cursor_col=0)
+    gm.handle_command({"a": "p", "i": "1", "p": "9"}, b"", cursor_row=5, cursor_col=6)
+    assert len(gm.placements) == 1
+    assert gm.placements[0].row == 5 and gm.placements[0].col == 6
+
+
+def test_a_equals_T_display_honors_put_params_from_the_transmit_command():
+    # a=T's display step reuses the exact same put logic as a=p -- confirmed
+    # against kitty's own grman_handle_command (see graphics.py docstring).
+    gm = GraphicsManager()
+    payload = bytes((x + y) % 256 for y in range(4) for x in range(4) for _ in range(3))
+    gm.handle_command(
+        {"a": "T", "f": "24", "s": "4", "v": "4", "i": "1", "p": "3", "z": "7", "c": "1", "r": "1"},
+        _b64(payload), cursor_row=0, cursor_col=0,
+    )
+    placement = gm.placements[0]
+    assert placement.placement_id == 3
+    assert placement.z_index == 7
+    assert placement.num_cols == 1 and placement.num_rows == 1
+
+
+def test_put_referring_to_id_only_addressing_not_number():
+    gm = GraphicsManager()
+    response = gm.handle_command({"a": "p"}, b"", cursor_row=0, cursor_col=0)
+    assert response is None  # no image id given at all -- no response possible
+    assert gm.placements == []
+
+
+# --- a=q (query) ---
+
+
+def test_query_valid_transmission_responds_ok_and_does_not_persist():
+    gm = GraphicsManager()
+    pixels = bytes(range(12))
+    response = gm.handle_command({"a": "q", "f": "24", "s": "2", "v": "2", "i": "1"}, _b64(pixels), cursor_row=0, cursor_col=0)
+    assert response == b"\x1b_Gi=1;OK\x1b\\"
+    assert 1 not in gm.images
+    assert gm.placements == []
+
+
+def test_query_invalid_transmission_responds_with_error():
+    gm = GraphicsManager()
+    short = bytes(range(6))
+    response = gm.handle_command({"a": "q", "f": "24", "s": "2", "v": "2", "i": "1"}, _b64(short), cursor_row=0, cursor_col=0)
+    assert response is not None and b"EINVAL" in response
+    assert 1 not in gm.images
+
+
+def test_query_without_id_produces_no_response():
+    gm = GraphicsManager()
+    response = gm.handle_command({"a": "q", "f": "24", "s": "2", "v": "2"}, _b64(bytes(range(12))), cursor_row=0, cursor_col=0)
+    assert response is None
+
+
+# --- a=d (delete) ---
+
+
+def test_delete_all_clears_placements_but_keeps_image_data():
+    gm = GraphicsManager()
+    _transmit_only(gm, 1, 2, 2)
+    gm.handle_command({"a": "p", "i": "1"}, b"", cursor_row=0, cursor_col=0)
+    response = gm.handle_command({"a": "d", "d": "a"}, b"", cursor_row=0, cursor_col=0)
+    assert response is None  # delete never produces a command response
+    assert gm.placements == []
+    assert 1 in gm.images
+
+
+def test_delete_all_uppercase_also_frees_image_data():
+    gm = GraphicsManager()
+    _transmit_only(gm, 1, 2, 2)
+    gm.handle_command({"a": "p", "i": "1"}, b"", cursor_row=0, cursor_col=0)
+    gm.handle_command({"a": "d", "d": "A"}, b"", cursor_row=0, cursor_col=0)
+    assert gm.placements == []
+    assert gm.images == {}
+
+
+def test_delete_by_id_only_removes_that_images_placements():
+    gm = GraphicsManager()
+    _transmit_only(gm, 1, 2, 2)
+    _transmit_only(gm, 2, 2, 2)
+    gm.handle_command({"a": "p", "i": "1"}, b"", cursor_row=0, cursor_col=0)
+    gm.handle_command({"a": "p", "i": "2"}, b"", cursor_row=1, cursor_col=1)
+    gm.handle_command({"a": "d", "d": "i", "i": "1"}, b"", cursor_row=0, cursor_col=0)
+    assert [pl.image_id for pl in gm.placements] == [2]
+    assert 1 in gm.images  # lowercase 'i' does not free image data
+
+
+def test_delete_by_id_and_placement_id_removes_only_that_placement():
+    gm = GraphicsManager()
+    _transmit_only(gm, 1, 2, 2)
+    gm.handle_command({"a": "p", "i": "1", "p": "1"}, b"", cursor_row=0, cursor_col=0)
+    gm.handle_command({"a": "p", "i": "1", "p": "2"}, b"", cursor_row=1, cursor_col=1)
+    gm.handle_command({"a": "d", "d": "i", "i": "1", "p": "1"}, b"", cursor_row=0, cursor_col=0)
+    assert [pl.placement_id for pl in gm.placements] == [2]
+
+
+def test_delete_by_z_index():
+    gm = GraphicsManager()
+    _transmit_only(gm, 1, 2, 2)
+    gm.handle_command({"a": "p", "i": "1", "z": "5"}, b"", cursor_row=0, cursor_col=0)
+    gm.handle_command({"a": "p", "i": "1", "z": "9"}, b"", cursor_row=1, cursor_col=1)
+    gm.handle_command({"a": "d", "d": "z", "z": "5"}, b"", cursor_row=0, cursor_col=0)
+    assert [pl.z_index for pl in gm.placements] == [9]
+
+
+def test_delete_by_cursor_position():
+    gm = GraphicsManager()
+    _transmit_only(gm, 1, 2, 2)
+    gm.handle_command({"a": "p", "i": "1"}, b"", cursor_row=2, cursor_col=2)
+    gm.handle_command({"a": "d", "d": "c"}, b"", cursor_row=2, cursor_col=2)
+    assert gm.placements == []
+
+
+def test_delete_by_column_and_row_with_explicit_span():
+    gm = GraphicsManager()
+    _transmit_only(gm, 1, 8, 8)
+    gm.handle_command({"a": "p", "i": "1", "c": "3", "r": "3"}, b"", cursor_row=5, cursor_col=5)
+    # 1-indexed column/row inside the 3x3 span starting at (5,5)
+    response = gm.handle_command({"a": "d", "d": "x", "x": "7"}, b"", cursor_row=0, cursor_col=0)
+    assert response is None
+    assert gm.placements == []
+
+
+def test_delete_unrecognized_action_is_ignored_not_crashed():
+    gm = GraphicsManager()
+    _transmit_only(gm, 1, 2, 2)
+    gm.handle_command({"a": "p", "i": "1"}, b"", cursor_row=0, cursor_col=0)
+    gm.handle_command({"a": "d", "d": "n"}, b"", cursor_row=0, cursor_col=0)  # by-number, unsupported
+    assert len(gm.placements) == 1

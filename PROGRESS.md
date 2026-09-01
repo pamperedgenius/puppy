@@ -74,6 +74,71 @@ found because writing an honest terminfo entry (which has a `bce` capability fla
 forced the question "do we actually do this?" Worth treating protocol/terminfo work
 as a trigger for another verification pass, not just a one-time audit.
 
+## Current status (2026-09-02, kitty graphics completeness: a=p/a=d/a=q, z-index)
+
+User picked this off the standing candidate list (kitty-graphics completeness vs.
+keybind config vs. tabs/splits/Sixel vs. the interactive-verification pass) rather than
+the interactive-verification pass this file had recommended — noted, not overridden.
+Mid-session the user also flagged launch time as "horrendous"; explicitly deferred
+re-profiling it to after this pass finished (see the still-open 2026-08-20 entry further
+down) rather than splitting focus.
+
+**Built, tested (372 total, up from 346), and smoke-tested via a direct `Screen`
+integration test (not just the GraphicsManager unit tests) — not yet visually confirmed
+in a live window** (the desktop already had a puppy instance running this session; per
+the live-window-testing rule, didn't touch it to do a visual pass):
+
+- **`a=p` (put)**: displays an already-transmitted image by id, with `p=` placement id
+  (repeating the same `p=` on the same image id replaces that placement rather than
+  adding a second one — confirmed against kitty's real `handle_put_command`), `z=`
+  z-index, explicit `c=`/`r=` cell span, and `x=`/`y=`/`w=`/`h=` pixel cropping.
+- **`a=T`'s display step now goes through the exact same put logic `a=p` uses**
+  (`GraphicsManager._place`), not separate code — confirmed this is what kitty's real
+  `grman_handle_command` does too (the transmit command's own `p=`/`z=`/`c=`/`r=`/
+  crop keys apply to its auto-display exactly like a following `a=p` would).
+- **`a=d` (delete)**: `a`/`A` (all, `A` also frees image data), `i`/`I` (by image id,
+  optionally narrowed by `p=`), `c`/`C` (at cursor), `p`/`P`/`q`/`Q` (at a given cell,
+  `q`/`Q` also filtered by `z=`), `x`/`X`/`y`/`Y` (column/row), `z`/`Z` (exact z-index).
+  Not supported, documented in `_handle_delete`'s docstring: `n`/`N` (by image
+  *number* — number-based addressing was never built), `r`/`R` (id range), `f`/`F`
+  (animation frame). **One real, documented approximation**: the point/column/row/z
+  filters need each placement's actual rendered cell span to test coverage, which needs
+  cell pixel dimensions — only the render layer has those, not the graphics model layer.
+  An explicit `c=`/`r=` placement is matched exactly; an auto-sized one (`c=`/`r=` never
+  given) is approximated as covering only its anchor cell. Matches real usage patterns
+  (icat/chafa-style single-placement clears) correctly; a multi-cell auto-sized image
+  targeted by an off-anchor point/column/row filter would miss, a real gap, not a bug in
+  what's built.
+- **`a=q` (query)**: runs a real image through the exact same chunked-transmission/
+  decode path as `a=t`/`a=T`, responds OK/error, but never persists into `self.images`
+  and never creates a placement — confirmed against kitty's own `remove_images` call
+  right after responding to a query.
+- **Command responses**: every action that produces one (`t`/`T`/`q`/`p`) now writes a
+  real `\x1b_Gi=<id>[,p=<placement>];OK` or `;<CODE>:<message>` response back through
+  `Screen._write_back` (already wired to the real PTY in both `render/app.py` and
+  `__main__.py` — no new plumbing needed there), gated by `q=`/quiet the same way
+  kitty's real `finish_command_response` is (`q=1` suppresses only the OK case, `q=2`
+  suppresses everything). `a=d` never responds at all, matching kitty exactly (its
+  `handle_delete_command` call site never assigns a response).
+- **Z-index**: `Placement` now carries `z_index` (default 0); `GraphicsRenderer.render`
+  draws `sorted(graphics.placements, key=lambda pl: pl.z_index)` (Python's stable sort
+  keeps insertion order for ties) instead of raw placement order. Confirmed via a real
+  GPU pixel-readback test: two overlapping placements, the higher-z one transmitted
+  *first* still ends up on top.
+- **Cropping now real for `a=p`-created placements** (`src_x`/`src_y`/`src_width`/
+  `src_height` on `Placement`, resolved to a normalized texcoord `src_rect` at render
+  time in `GraphicsRenderer.render` — previously always the full `[0,1]` identity rect).
+  Confirmed via a real GPU pixel-readback test cropping a two-color image down to just
+  one half.
+
+**Explicitly still out of scope, not attempted this pass** (see `puppy/graphics.py`'s
+module docstring for the authoritative list): `a=a`/`a=f` (animation — frame loading,
+gaps, composition, timers; a genuinely large separate subsystem, not a small add-on to
+this pass), `a=c` (compose), unicode-placeholder virtual placements, file/shm
+transmission (`t=f`/`t=t`/`t=s`), image-number addressing (`I=`, and delete's
+`n=`/`N=`/`r=`/`R=` variants that key off it), sub-cell pixel offsets (`X=`/`Y=` on
+put), parent-relative placements (`P=`/`Q=` on put).
+
 ## Current status (2026-08-31, config file)
 
 **A real config file built — `~/.config/puppy/config.toml`, covering the
@@ -1486,26 +1551,29 @@ dependencies live there, not in system Python. `pip install -e .` again if the v
 is ever recreated (it's gitignored).
 
 **Nothing is mid-flight; there is no unfinished code to pick back up.** Everything
-through the 2026-08-31 config-file pass (see the "Current status (2026-08-31,
-config file)" entry above for full detail) is real, committed, pushed,
-test-covered (346 passing), and smoke-tested live. Five things from recent
-sessions are real but still only smoke-tested, not yet interactively/visually
-confirmed by a human: the visible cursor (needs a theme with real cursor/bg
-contrast — see the cursor entry below for which one), text selection,
-scrollback view, double/triple-click, and config.toml's `font_size` actually
-changing the rendered glyph size live — the config file's own parsing is
-fully unit-tested, but "does it visibly resize the window" needs a human
-watching it. Genuinely worth prioritizing a real interactive pass over more
-new features at this point — five smoke-tested-only passes in a row is a lot
-to have unverified at once.
+through the 2026-09-02 kitty-graphics-completeness pass (see the "Current status
+(2026-09-02, ...)" entry above for full detail) is real, committed, pushed,
+test-covered (372 passing), and confirmed via a direct `Screen`-level
+integration smoke test — but not yet visually confirmed in a live window (a
+puppy instance was already running on the desktop this session; didn't touch it
+per the live-window-testing rule). **Launch time was flagged again this session
+("horrendous") and explicitly deferred** — pick this up next, it's the oldest
+open item (first measured ~1.1s, wgpu-bring-up-dominated, on 2026-08-20, never
+re-profiled since). Six things total are now real-but-only-smoke-tested, not
+yet interactively/visually confirmed by a human: the visible cursor (needs a
+theme with real cursor/bg contrast — see the cursor entry for which one), text
+selection, scrollback view, double/triple-click, config.toml's `font_size`
+actually resizing glyphs live, and this session's `a=p`/`a=d`/`a=q`/z-index/
+cropping graphics work. Genuinely worth prioritizing launch-time profiling
+and/or a real interactive pass over more new features at this point.
 
-**All three of the "daily-driver basics" items from 2026-08-24, plus
-double/triple-click select and a font/theme config file, are now built.** Ask
-the user what's next before picking a direction — real candidates, none
-picked unilaterally: kitty-graphics completeness (`a=p`/`a=d`/`a=q`, z-index,
-animation), keybind configuration (the one config-file piece deliberately
-deferred — see the config-file entry above for why), tabs/splits, Sixel, or a
-real interactive confirmation pass on everything shipped today (see above).
+**Animation (`a=a`/`a=f`) was explicitly scoped out of the 2026-09-02 pass** —
+it's a genuinely large separate subsystem (frame loading, gaps, composition
+modes, timers, GPU frame swapping), not a small add-on to put/delete/query/
+z-index. If graphics work continues, this is the natural next slice. Other
+real candidates, none picked unilaterally: keybind configuration (the one
+config-file piece deliberately deferred — see the config-file entry for why),
+tabs/splits, Sixel, or the interactive confirmation pass mentioned above.
 
 ### 2026-08-24 session recap (second live user bug-report pass)
 

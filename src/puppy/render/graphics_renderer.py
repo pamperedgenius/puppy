@@ -21,17 +21,22 @@ created as `rgba8unorm_srgb` -- the GPU auto-decodes to linear on sample,
 matching the surface's own auto-encode-on-write, instead of needing a manual
 `srgb_to_linear` step the way plain per-vertex colors do.
 
-v1 scope, matching puppy.graphics's model-layer scope: whole-image display
-only (`src_rect` is always the full [0,1] identity rect -- no cropping, no
-`c`/`r` control-key support), auto-sized to the image's native pixel size
-divided by cell size (kitty's own auto-cols/auto-rows formula from
-`update_dest_rect`, since v1 never parses explicit `c`/`r`), no z-index
-layering (images always draw on top of the full cell grid, single pass, in
-placement order -- not kitty's real below/negative/positive z-index tiers),
-no scrollback scrolling of images, one draw call per placement with its own
-tiny per-placement uniform buffer (not kitty's `group_count` instancing
-optimization -- fine at real-world image-placement counts, revisit only if
-profiling ever shows otherwise, same "don't pre-optimize" rule as the parser).
+v2 scope (this pass): placements now carry real crop (`src_x`/`src_y`/
+`src_width`/`src_height`, 0 meaning "to the image's edge") and explicit
+`num_cols`/`num_rows`, both resolved here at render time from the `Placement`
+fields `puppy.graphics` now populates for `a=p`/`a=T`. Placements are drawn
+sorted by `z_index` ascending (ties keep insertion order via Python's stable
+sort) -- lower z-index draws first/behind, matching kitty's real ordering
+intent, though not its exact below/negative/positive three-tier compositing
+against the text grid itself (images always draw on top of the full cell
+grid here, single pass -- see `puppy.graphics`'s module docstring for what
+z-index does and doesn't cover in this project).
+
+v1 scope, still true: no scrollback scrolling of images, one draw call per
+placement with its own tiny per-placement uniform buffer (not kitty's
+`group_count` instancing optimization -- fine at real-world image-placement
+counts, revisit only if profiling ever shows otherwise, same "don't
+pre-optimize" rule as the parser).
 """
 from __future__ import annotations
 
@@ -86,8 +91,6 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
 """
 
 _UNIFORM_DTYPE = np.dtype([("src_rect", "f4", 4), ("dest_rect", "f4", 4)])
-
-_FULL_SRC_RECT = (0.0, 0.0, 1.0, 1.0)
 
 
 class GraphicsRenderer:
@@ -184,20 +187,32 @@ class GraphicsRenderer:
         pass_.set_pipeline(self._pipeline)
         dx = 2.0 / cols
         dy = 2.0 / rows
-        for placement in graphics.placements:
+        # Ascending z-index draws first (behind); stable sort preserves
+        # insertion order among equal z-indexes, same as kitty's own
+        # image_id/ref_id tie-break for a real-world-equivalent result.
+        for placement in sorted(graphics.placements, key=lambda pl: pl.z_index):
             image = graphics.images.get(placement.image_id)
             if image is None:
                 continue
             texture = self._texture_for(image)
-            num_cols = max(1, math.ceil(image.width / cell_width))
-            num_rows = max(1, math.ceil(image.height / cell_height))
+            num_cols = placement.num_cols or max(1, math.ceil(image.width / cell_width))
+            num_rows = placement.num_rows or max(1, math.ceil(image.height / cell_height))
             top = 1.0 - placement.row * dy
             left = -1.0 + placement.col * dx
             bottom = top - num_rows * dy
             right = left + num_cols * dx
 
+            src_width = placement.src_width or (image.width - placement.src_x)
+            src_height = placement.src_height or (image.height - placement.src_y)
+            src_rect = (
+                placement.src_x / image.width,
+                placement.src_y / image.height,
+                (placement.src_x + src_width) / image.width,
+                (placement.src_y + src_height) / image.height,
+            )
+
             uniforms = np.zeros(1, dtype=_UNIFORM_DTYPE)
-            uniforms[0] = (_FULL_SRC_RECT, (left, top, right, bottom))
+            uniforms[0] = (src_rect, (left, top, right, bottom))
             uniform_buffer = device.create_buffer_with_data(data=uniforms.tobytes(), usage=wgpu.BufferUsage.UNIFORM)
             bind_group = device.create_bind_group(
                 layout=self._bind_group_layout,
