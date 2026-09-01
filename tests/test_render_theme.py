@@ -79,6 +79,34 @@ def test_load_theme_selection_colors_fall_back_to_kitty_stock_defaults(tmp_path)
     assert theme.selection_bg == (255, 250, 205)
 
 
+def test_theme_name_override_pins_a_specific_theme(tmp_path, monkeypatch):
+    # The wallpaper symlink resolves to "midnight2", but a theme_name
+    # override should pick a *different* theme directly by name instead.
+    link = _make_theme_dir(tmp_path, "midnight2", _SAMPLE_COLORS)
+    other_dir = tmp_path / "themes" / "focusedpanic"
+    other_dir.mkdir(parents=True)
+    (other_dir / "kitty-colors.conf").write_text("background #0c151e\nforeground #fefefe\n")
+    monkeypatch.setattr("puppy.render.theme._THEMES_DIR", str(tmp_path / "themes"))
+
+    theme = load_theme(link, theme_name="focusedpanic")
+    assert theme.bg == (0x0C, 0x15, 0x1E)
+    assert theme.fg == (0xFE, 0xFE, 0xFE)
+
+
+def test_theme_name_override_falls_back_when_the_named_theme_does_not_exist(tmp_path, monkeypatch):
+    link = _make_theme_dir(tmp_path, "midnight2", _SAMPLE_COLORS)
+    monkeypatch.setattr("puppy.render.theme._THEMES_DIR", str(tmp_path / "themes"))
+
+    theme = load_theme(link, theme_name="does-not-exist")
+    assert theme.bg == (0x00, 0x00, 0x29)  # falls back to the active (midnight2) theme
+
+
+def test_no_theme_name_uses_the_active_theme_as_before(tmp_path):
+    link = _make_theme_dir(tmp_path, "midnight2", _SAMPLE_COLORS)
+    theme = load_theme(link, theme_name=None)
+    assert theme.bg == (0x00, 0x00, 0x29)
+
+
 def test_find_active_theme_dir_resolves_symlink(tmp_path):
     link = _make_theme_dir(tmp_path, "midnight2", _SAMPLE_COLORS)
     resolved = find_active_theme_dir(link)

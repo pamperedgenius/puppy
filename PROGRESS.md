@@ -74,6 +74,61 @@ found because writing an honest terminfo entry (which has a `bce` capability fla
 forced the question "do we actually do this?" Worth treating protocol/terminfo work
 as a trigger for another verification pass, not just a one-time audit.
 
+## Current status (2026-08-31, config file)
+
+**A real config file built — `~/.config/puppy/config.toml`, covering the
+first of the three things flagged as "still hardcoded in app.py"
+(`font_size`, `font_family`, `theme`; keybinds deliberately not attempted,
+see below). 346 tests passing (up from 336), 10 new.**
+
+- **New `src/puppy/config.py`**: `Config` dataclass (`font_size: int`,
+  `font_family: str | None`, `theme: str | None`) + `load_config(path)`.
+  Uses the stdlib `tomllib` (Python 3.11+, already this project's real
+  minimum per `pyproject.toml`) — no new dependency. A missing or malformed
+  config file is never fatal, same "fall back cleanly" convention
+  `theme.py` already follows for a missing/broken theme: `load_config`
+  catches `OSError`/`tomllib.TOMLDecodeError` and returns plain defaults
+  rather than raising. Wrong-typed values (e.g. `font_size = "big"`) are
+  ignored, not trusted — real, deliberate input validation at this one
+  system boundary (a config file a human hand-edits), consistent with the
+  project's "only validate at system boundaries" convention.
+- **`theme.py`**: `load_theme()` gained a `theme_name` param — when set,
+  resolves directly to `~/.config/theme-switcher/themes/<theme_name>/`
+  instead of following the wallpaper symlink that otherwise always tracks
+  whatever theme is active system-wide. Falls back to the normal
+  active-theme resolution if the named directory doesn't exist (a typo'd
+  theme name in `config.toml` shouldn't prevent puppy from starting).
+- **`app.py`**: `find_monospace_font`/`find_bold_monospace_font` gained a
+  `family` param (defaults to `"monospace"`, unchanged behavior) so
+  `config.toml`'s `font_family` can point `fc-match` at a specific font
+  name instead of the generic alias. `run()`'s `pixel_size` param default
+  changed from a hardcoded `16` to `None` specifically so "the caller
+  didn't ask for a particular size" is distinguishable from "the caller
+  asked for puppy's original 16px" — an explicit caller-supplied
+  `pixel_size` still wins outright over `config.toml` (e.g. programmatic
+  use), but the common case (just running `puppy` with no arguments) now
+  actually lets `config.toml`'s `font_size` take effect.
+- **Not built this session** (real, deliberate v1 cut, explicitly flagged
+  as much bigger scope, not an oversight): **keybind configuration.**
+  Would need changes in both `keyboard.py`'s legacy xterm-style encoder and
+  `kitty_keyboard.py`'s CSI-u protocol encoder — a materially larger
+  change than font/theme overrides (which only ever needed to thread one
+  new optional param through 2-3 already-existing functions). Also not
+  built: any config-file *validation/reporting* beyond silent fallback
+  (e.g. a warning printed to stderr on a malformed file) — a real, minor,
+  low-priority gap, not attempted.
+- **Verified**: full suite green (346 passed, 10 new — `test_config.py`
+  covering missing/malformed/partial/wrong-typed/empty-string config
+  files, `test_render_theme.py` `theme_name` override + not-found-fallback
+  + no-override-unchanged cases); a fresh `timeout 4 python -m
+  puppy.render.app` live run still starts and shows up correctly in `niri
+  msg windows` with no crash/traceback, tested **both** with no config
+  file present (the common case) and with a real `font_size = 24`
+  `config.toml` present (removed again afterward — not left behind as a
+  permanent user-facing config the user didn't ask to create). Not yet
+  visually confirmed that a larger `font_size` actually renders bigger
+  glyphs live (would need a human watching the window).
+
 ## Current status (2026-08-31, double/triple-click select)
 
 **Double-click word-select and triple-click line-select built — the smallest
@@ -1309,7 +1364,12 @@ with the date when something is confirmed working (not just "code exists").
       shader logic. Live smoke-tested (no crash/traceback), not yet visually
       confirmed with real contrast — the currently active theme's own cursor
       color is itself near-black against its background, unrelated to this
-      code's correctness.
+      code's correctness. **Root cause of the theme's own black cursor now
+      diagnosed** (not a puppy bug, a RengeOS theme-switcher one, and not
+      specific to this one theme — 564 of 566 themes have the same literal
+      `#000000` cursor regardless of background): full writeup at
+      `~/Documents/theme-switcher-cursor-black-bug-report.md`, not fixed
+      here, out of this repo's scope.
 - [x] **Text selection (click-drag, copy) — 2026-08-31.** `Screen.
       start_selection`/`update_selection`/`clear_selection`/`has_selection`/
       `cell_selected`/`selected_text`, `mouse_reporting_active` property
@@ -1348,6 +1408,17 @@ with the date when something is confirmed working (not just "code exists").
       correctly), not yet interactively confirmed. Real, documented v1 cut:
       dragging after a word/line click isn't multi-click-aware (falls back
       to ordinary per-cell extension).
+- [x] **Config file (`~/.config/puppy/config.toml`) — 2026-08-31.**
+      `font_size`/`font_family`/`theme` overrides, new `src/puppy/config.py`
+      (stdlib `tomllib`, no new dependency). `theme.py`'s `load_theme()`
+      gained a `theme_name` override param; `app.py`'s
+      `find_monospace_font`/`find_bold_monospace_font` gained a `family`
+      param. See the "Current status (2026-08-31, config file)" entry above
+      for full detail. 10 new tests (346 total, up from 336). Live
+      smoke-tested both with and without a real config file present, no
+      crash. Real, deliberate v1 cut, explicitly bigger scope: keybind
+      configuration (would need changes in both `keyboard.py` and
+      `kitty_keyboard.py`, not attempted here).
 
 ## File map
 
@@ -1366,6 +1437,7 @@ puppy/
     keyboard.py             legacy GLFW-key -> byte-sequence encoding
     kitty_keyboard.py        CSI u progressive-enhancement key encoding
     graphics.py               GraphicsManager — kitty graphics protocol model layer (no rendering)
+    config.py                  Config/load_config() — ~/.config/puppy/config.toml (font_size/font_family/theme)
     render/
       __init__.py          toolkit-choice rationale pointer
       gpu.py                 GpuContext — canvas-agnostic adapter/device/surface + clear()
@@ -1391,6 +1463,7 @@ puppy/
     test_keyboard.py       legacy key-encoding correctness, no GPU/window needed
     test_kitty_keyboard.py  CSI u encoding correctness, no GPU/window needed
     test_graphics.py        GraphicsManager model-layer correctness, no GPU/window needed
+    test_config.py           config.toml parsing, real temp-dir fixtures, no live-machine dependency
     test_render_font.py   real shaping/rasterization, portable (fc-match, no hardcoded font)
     test_render_atlas.py   pure packing/blit logic, no GPU needed
     test_render_cell_renderer.py  real GPU + real pixel readback, exact-color proofs
@@ -1413,23 +1486,25 @@ dependencies live there, not in system Python. `pip install -e .` again if the v
 is ever recreated (it's gitignored).
 
 **Nothing is mid-flight; there is no unfinished code to pick back up.** Everything
-through the 2026-08-31 double/triple-click pass (see the "Current status
-(2026-08-31, double/triple-click select)" entry above for full detail) is real,
-committed, pushed, test-covered (336 passing), and smoke-tested live. Four
-things from recent sessions are real but still only smoke-tested, not yet
-interactively/visually confirmed by a human: the visible cursor (needs a theme
-with real cursor/bg contrast — see the cursor entry below for which one), text
-selection, scrollback view, and double/triple-click (the latter three all need
-an actual human driving a real mouse in a live window, not simulated from
-here) — genuinely worth prioritizing a real interactive pass over more new
-features at this point, four smoke-tested-only passes in a row is a lot to
-have unverified at once.
+through the 2026-08-31 config-file pass (see the "Current status (2026-08-31,
+config file)" entry above for full detail) is real, committed, pushed,
+test-covered (346 passing), and smoke-tested live. Five things from recent
+sessions are real but still only smoke-tested, not yet interactively/visually
+confirmed by a human: the visible cursor (needs a theme with real cursor/bg
+contrast — see the cursor entry below for which one), text selection,
+scrollback view, double/triple-click, and config.toml's `font_size` actually
+changing the rendered glyph size live — the config file's own parsing is
+fully unit-tested, but "does it visibly resize the window" needs a human
+watching it. Genuinely worth prioritizing a real interactive pass over more
+new features at this point — five smoke-tested-only passes in a row is a lot
+to have unverified at once.
 
 **All three of the "daily-driver basics" items from 2026-08-24, plus
-double/triple-click select, are now built.** Ask the user what's next before
-picking a direction — real candidates, none picked unilaterally: kitty-graphics
-completeness (`a=p`/`a=d`/`a=q`, z-index, animation), a config file (font
-size/theme/keybinds are still hardcoded in `app.py`), tabs/splits, Sixel, or a
+double/triple-click select and a font/theme config file, are now built.** Ask
+the user what's next before picking a direction — real candidates, none
+picked unilaterally: kitty-graphics completeness (`a=p`/`a=d`/`a=q`, z-index,
+animation), keybind configuration (the one config-file piece deliberately
+deferred — see the config-file entry above for why), tabs/splits, Sixel, or a
 real interactive confirmation pass on everything shipped today (see above).
 
 ### 2026-08-24 session recap (second live user bug-report pass)

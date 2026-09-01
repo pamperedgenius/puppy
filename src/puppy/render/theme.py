@@ -37,6 +37,7 @@ DEFAULT_FG = (255, 255, 255)
 DEFAULT_BG = (0, 0, 0)
 
 _DEFAULT_WALLPAPER_LINK = os.path.expanduser("~/.config/theme-switcher/wallpaper")
+_THEMES_DIR = os.path.expanduser("~/.config/theme-switcher/themes")
 
 
 @dataclass
@@ -97,8 +98,20 @@ def find_active_theme_dir(wallpaper_link: str = _DEFAULT_WALLPAPER_LINK) -> str 
     return os.path.dirname(real)
 
 
-def load_theme(wallpaper_link: str = _DEFAULT_WALLPAPER_LINK) -> Theme:
-    theme_dir = find_active_theme_dir(wallpaper_link)
+def load_theme(wallpaper_link: str = _DEFAULT_WALLPAPER_LINK, theme_name: str | None = None) -> Theme:
+    """theme_name (from puppy's own config.toml, see config.py) pins puppy to
+    one specific theme-switcher theme directly by name, bypassing the
+    wallpaper-symlink lookup that otherwise always follows whatever theme is
+    currently active system-wide -- lets puppy stay on a theme the user
+    picked even after switching the rest of the desktop to something else.
+    Falls back to the normal active-theme resolution if the named directory
+    doesn't exist, same as every other fallback in this function -- a typo'd
+    theme name shouldn't prevent puppy from starting."""
+    if theme_name:
+        named_dir = os.path.join(_THEMES_DIR, theme_name)
+        theme_dir = named_dir if os.path.isdir(named_dir) else find_active_theme_dir(wallpaper_link)
+    else:
+        theme_dir = find_active_theme_dir(wallpaper_link)
     if theme_dir is None:
         return Theme()
     colors_path = os.path.join(theme_dir, "kitty-colors.conf")

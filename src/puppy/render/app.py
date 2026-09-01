@@ -43,6 +43,7 @@ import time
 
 import numpy as np
 
+from ..config import Config, load_config
 from ..parser import Parser
 from ..pty_session import PtySession
 from ..screen import Screen
@@ -57,17 +58,20 @@ from .theme import DEFAULT_BG, DEFAULT_FG, load_theme
 from .window import Window
 
 
-def find_monospace_font() -> str:
+def find_monospace_font(family: str = "monospace") -> str:
+    """family lets puppy's config.toml (font_family) point fc-match at a
+    specific font name instead of the generic "monospace" alias -- same
+    fontconfig mechanism either way, just a different query string."""
     if not shutil.which("fc-match"):
         raise RuntimeError("fc-match not found -- can't resolve a system font (fontconfig missing?)")
-    result = subprocess.run(["fc-match", "-f", "%{file}", "monospace"], capture_output=True, text=True)
+    result = subprocess.run(["fc-match", "-f", "%{file}", family], capture_output=True, text=True)
     path = result.stdout.strip()
     if not path:
-        raise RuntimeError("fc-match found no monospace font")
+        raise RuntimeError(f"fc-match found no font for {family!r}")
     return path
 
 
-def find_bold_monospace_font() -> str | None:
+def find_bold_monospace_font(family: str = "monospace") -> str | None:
     """Best-effort: a distinct real bold face, matching how xfce4-terminal/
     Pango render bold rather than FreeType's synthetic embolden alone (see
     font.py's module docstring for why this matters -- a real, measured pixel-
@@ -77,7 +81,7 @@ def find_bold_monospace_font() -> str | None:
     face (fontconfig's own signal that no true bold weight exists)."""
     if not shutil.which("fc-match"):
         return None
-    result = subprocess.run(["fc-match", "-f", "%{file}", "monospace:bold"], capture_output=True, text=True)
+    result = subprocess.run(["fc-match", "-f", "%{file}", f"{family}:bold"], capture_output=True, text=True)
     path = result.stdout.strip()
     return path or None
 
@@ -161,11 +165,21 @@ def build_instances(
     return instances
 
 
-def run(rows: int = 24, cols: int = 80, pixel_size: int = 16) -> None:
-    theme = load_theme()
+def run(rows: int = 24, cols: int = 80, pixel_size: int | None = None) -> None:
+    # pixel_size explicitly passed by a caller wins outright over config.toml
+    # (e.g. programmatic use); the module-level default is None specifically
+    # so "the caller didn't ask for a particular size" is distinguishable
+    # from "the caller asked for puppy's original hardcoded 16px", letting
+    # config.toml's font_size actually take effect in the common case (just
+    # running `puppy` with no arguments).
+    config = load_config()
+    if pixel_size is None:
+        pixel_size = config.font_size
+    theme = load_theme(theme_name=config.theme)
 
-    font_path = find_monospace_font()
-    bold_font_path = find_bold_monospace_font()
+    font_family = config.font_family or "monospace"
+    font_path = find_monospace_font(font_family)
+    bold_font_path = find_bold_monospace_font(font_family)
     font = FontRenderer(font_path, pixel_size, bold_font_path=bold_font_path)
     atlas = GlyphAtlas(font.cell_width, font.cell_height, font.ascender)
     window = Window(rows, cols, font.cell_width, font.cell_height, title="puppy")
