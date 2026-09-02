@@ -74,6 +74,48 @@ found because writing an honest terminfo entry (which has a `bce` capability fla
 forced the question "do we actually do this?" Worth treating protocol/terminfo work
 as a trigger for another verification pass, not just a one-time audit.
 
+## Current status (2026-09-03, launch time -- shader-cache theory tested, REFUTED)
+
+User asked "why is puppy still doing a slow launch" after the 2026-09-02 fix, prompting
+a re-check. **The NVIDIA-wake fix itself is not regressed** — re-read `gpu.py`, confirmed
+`set_instance_extras(backends=["Primary"])` is still in place, unchanged since 2026-09-02.
+Total launch is still real, cold, honestly ~1.1-1.5s (0.52-0.57s GPU adapter/device
+bring-up + 0.29-0.36s shader-pipeline creation + ~0.15s everything else + ~0.35s Python
+interpreter/venv startup outside the instrumented range) — that number was never claimed
+fixed, only the *extra* ~1.7s on top of it from the NVIDIA GL-probe wake was.
+
+Directly tested the "re-profiled" entry's own open, explicitly-unconfirmed lead (shared,
+evictable Mesa shader cache explains the previously observed 1.1s-best/2.5s-worst
+variance) since the user picked "confirm the shader-cache theory" over the other two
+options offered (defer first paint past shader compile; accept as environmental cost).
+**Result: refuted, not confirmed.** A/B across `MESA_SHADER_CACHE_DISABLE=true` (always
+forces a real recompile, no caching at all), a brand-new empty `MESA_SHADER_CACHE_DIR`
+on its first-ever hit (genuinely cold, isolated from every other app's cache traffic),
+and the same isolated dir on a second hit (genuinely warm, same isolation) all landed at
+the *identical* ~0.30-0.31s for the shader-creation step, plus 4 back-to-back fresh-
+process trials against today's real shared cache all landing at ~1.08-1.16s total with
+no first-in-burst spike. If shader-cache eviction were the explanation, disabling the
+cache entirely (guaranteed-cold on every run) should have looked like the isolated-cold
+case and both should have clearly cost more than the isolated-warm case — instead all
+three were indistinguishable. Whatever this specific shader/pipeline actually costs to
+create, a disk cache isn't measurably helping or hurting it either way here.
+
+**Consequence**: the original 2026-09-02 "re-profiled" finding's ~2.0-2.5s
+first-in-a-burst worst case did not reproduce today under otherwise-similar conditions
+(same machine, same code, same shared-cache state) — either it's genuinely
+environmental/transient (a specific desktop GPU-idle state at the time, since Intel's
+iGPU — the adapter puppy actually uses, confirmed 2026-09-02 — can have its own
+runtime-power-management wake cost distinct from the already-fixed NVIDIA one, and
+today's desktop simply wasn't in that state during any trial) or it depended on system
+conditions not reproduced by this session's tests. Not chased further per the same
+"real candidates, none picked unilaterally" posture as everywhere else in this file —
+the two remaining real options are the same two the user didn't pick this time:
+(a) restructure `run()` to show the window before `CellRenderer`'s pipeline creation
+finishes, so the ~0.3s becomes invisible to the user even though it's still spent, or
+(b) accept ~1.1-1.5s cold-launch as this architecture's real, honest cost (a from-scratch
+wgpu-rendered terminal doing real Vulkan adapter/device/pipeline setup in Python, next to
+compiled-native terminals that pay none of that) and stop chasing it.
+
 ## Current status (2026-09-02, kitty graphics animation: a=f/a=a)
 
 User picked "Animation (a=a/a=f)" off the standing candidate list (vs. keybind config,
@@ -1798,28 +1840,28 @@ puppy/
 dependencies live there, not in system Python. `pip install -e .` again if the venv
 is ever recreated (it's gitignored).
 
-**Nothing is mid-flight; there is no unfinished code to pick back up.** Everything
-through the 2026-09-02 animation pass (see the "Current status (2026-09-02, kitty
-graphics animation: a=f/a=a)" entry above for full detail) is real, committed, pushed,
-test-covered (394 passing, up from 372), and confirmed via both real GPU pixel-readback
-tests and a direct `Parser`->`Screen`->`GraphicsManager` integration smoke test — but not
-yet visually confirmed in a live window (no puppy instance was running this session to
-avoid per the live-window-testing rule; a real multi-frame animation playing correctly
-on screen is still unverified by an actual human). **Launch time was also chased down
-and actually fixed** in an earlier same-day session (see the "Current status
-(2026-09-02, launch time -- ROOT CAUSE FOUND AND FIXED, in-code)" entry above, which
-supersedes two earlier same-session dead-end write-ups) — `puppy/render/gpu.py` now
-restricts wgpu-native's Instance to non-GL backends, which stops it from waking this
-laptop's discrete NVIDIA GPU on every launch. Real, in-code, zero system changes,
-confirmed across multiple genuinely-cold trials. Seven things total are now
-real-but-only-smoke/unit-tested, not yet interactively/visually confirmed by a human:
-the visible cursor (needs a theme with real cursor/bg contrast — see the cursor entry
-for which one), text selection, scrollback view, double/triple-click, config.toml's
-`font_size` actually resizing glyphs live, the `a=p`/`a=d`/`a=q`/z-index/cropping
-graphics work, and now this pass's animation playback. Genuinely worth prioritizing
-launch-time profiling (already done, see above) and/or a real interactive pass over
-more new features at this point — the smoke-tested-but-unconfirmed list keeps growing
-while nothing on it has been checked by a human yet.
+**Nothing is mid-flight; there is no unfinished code to pick back up.** The 2026-09-02
+animation pass (see the "Current status (2026-09-02, kitty graphics animation: a=f/a=a)"
+entry above for full detail) is real, committed, pushed, test-covered (394 passing, up
+from 372), and confirmed via both real GPU pixel-readback tests and a direct
+`Parser`->`Screen`->`GraphicsManager` integration smoke test — but not yet visually
+confirmed in a live window (a real multi-frame animation playing correctly on screen is
+still unverified by an actual human). **Launch time**: the NVIDIA-wake bug is genuinely
+fixed (`puppy/render/gpu.py` restricts wgpu-native's Instance to non-GL backends —
+confirmed still in place and not regressed as of 2026-09-03), but total cold launch is
+still honestly ~1.1-1.5s, and the shared-Mesa-shader-cache-eviction theory floated as the
+explanation for the worse ~2.5s cases has now been **tested and refuted** (2026-09-03:
+disabled-cache, isolated-cold, and isolated-warm trials were all statistically
+indistinguishable — see that entry). The two remaining real options, neither picked
+yet: defer first paint past `CellRenderer`'s pipeline-creation step so the ~0.3s becomes
+invisible even though it's still spent, or accept ~1.1-1.5s as this architecture's
+honest cost and stop chasing it. Eight things total are now real-but-only-smoke/
+unit-tested, not yet interactively/visually confirmed by a human: the visible cursor
+(needs a theme with real cursor/bg contrast — see the cursor entry for which one), text
+selection, scrollback view, double/triple-click, config.toml's `font_size` actually
+resizing glyphs live, the `a=p`/`a=d`/`a=q`/z-index/cropping graphics work, this pass's
+animation playback, and (implicitly, always) every launch-time number itself, which is
+all synthetic-script-measured, never stopwatched by a human actually running `puppy`.
 
 **`a=c` (compose two already-existing frames) was explicitly scoped out of this
 pass** — a real, separate follow-up if animation work continues (see the Current
