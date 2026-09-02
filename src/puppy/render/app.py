@@ -184,6 +184,23 @@ def run(rows: int = 24, cols: int = 80, pixel_size: int | None = None) -> None:
     atlas = GlyphAtlas(font.cell_width, font.cell_height, font.ascender)
     window = Window(rows, cols, font.cell_width, font.cell_height, title="puppy")
 
+    # Perceived-launch-time improvement (2026-09-03): the window is already
+    # mapped on screen as soon as Window() returns (GLFW's default visibility
+    # hint), but CellRenderer's pipeline creation just below costs a real,
+    # measured ~0.3s of shader compilation -- during which the surface would
+    # otherwise show whatever undefined content an unpainted wgpu swapchain
+    # gives a compositor. Paint the theme's real background right now, before
+    # doing any of that, so the window looks alive and correctly themed
+    # immediately instead of sitting blank for that stretch. This does not
+    # change total wall time to a fully functional terminal -- CellRenderer
+    # still costs what it costs -- it only moves the first visible paint
+    # earlier, matching this project's PROGRESS.md launch-time investigation
+    # (see the 2026-09-03 entry: the shader-cache-eviction theory that would
+    # have explained the ~0.3s away was tested and refuted, so this is the
+    # honest mitigation, not a fix for the underlying cost).
+    window.canvas.request_draw(lambda: window.gpu.clear(srgb_color(*theme.bg)))
+    window.canvas.force_draw()
+
     # Real, confirmed bug fixed here (2026-08-20, found live-testing the
     # previous resize fix): niri assigns the window its real tiled size
     # during creation itself (confirmed: window.get_framebuffer_size()

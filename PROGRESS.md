@@ -74,6 +74,51 @@ found because writing an honest terminfo entry (which has a `bce` capability fla
 forced the question "do we actually do this?" Worth treating protocol/terminfo work
 as a trigger for another verification pass, not just a one-time audit.
 
+## Current status (2026-09-03, launch time -- early background paint, real perceived win)
+
+Follow-up to the shader-cache-theory-refuted entry directly below: with that ruled out,
+picked the other real, previously-unattempted option instead of stopping at "accept it"
+-- deferring first paint past `CellRenderer`'s pipeline-creation cost, per the user's
+"try them" (both remaining options were on the table; the actionable one is this).
+
+`render/app.py`'s `run()` now does one extra `window.gpu.clear(srgb_color(*theme.bg))` +
+`force_draw()` immediately after `Window()` returns, *before* `CellRenderer`/
+`GraphicsRenderer` are constructed. `GpuContext.clear()` (already existed, from the
+project's very first rendering milestone) needs no shader pipeline of its own -- it's a
+plain load_op-clear render pass -- so this costs only the clear+present cycle itself, not
+the ~0.3s `CellRenderer` shader compile.
+
+**Measured live** (real GLFW window, launched via `python -m puppy.render.app`,
+auto-terminated after 2.5s with `SIGTERM` -- a deliberate, one-time, single launch for
+this verification, not a repeated open/close cycle): temporary stderr timestamps at each
+stage, removed again after confirming (not left in the shipped code) --
+
+```
+window created:          t=+0.000s
+early paint presented:    +0.108s   (previously: window sat undefined here)
+renderers ready:          +0.440s   (CellRenderer + GraphicsRenderer pipeline creation)
+entering main loop:       +0.444s
+first real text frame:    +0.475s
+```
+
+Confirms the real effect: the window now shows the correctly-themed background ~0.33s
+before it otherwise would have (whatever undefined content an unpainted wgpu swapchain
+gives the compositor, previously visible for that entire stretch). **Total wall time to
+a fully functional, text-rendering terminal is unchanged** — this is a genuine
+perceived-latency improvement, not a fix to the underlying ~0.3s shader-compile cost,
+exactly as scoped going in. 394 tests still passing (no test coverage added — this is a
+`run()`-only live-window behavior change with no headless-testable surface, same
+category as the rest of `render/app.py`).
+
+**Still true, now for a stronger reason to just accept it**: total cold launch remains
+~1.1-1.5s. With the shader-cache theory refuted and this perceived-latency mitigation
+now in place, there is no remaining actionable lead for reducing the *actual* GPU
+adapter/device (~0.55s) or shader-pipeline (~0.3s) costs themselves — both are genuine
+wgpu/Vulkan work this from-scratch Python renderer has no lever over short of a much
+larger architecture change (e.g. the previously-flagged, real-regression-risk GL-backend
+experiment against the NVIDIA adapter). Recommend treating this as closed unless a new
+concrete lead shows up.
+
 ## Current status (2026-09-03, launch time -- shader-cache theory tested, REFUTED)
 
 User asked "why is puppy still doing a slow launch" after the 2026-09-02 fix, prompting
@@ -1846,22 +1891,23 @@ entry above for full detail) is real, committed, pushed, test-covered (394 passi
 from 372), and confirmed via both real GPU pixel-readback tests and a direct
 `Parser`->`Screen`->`GraphicsManager` integration smoke test — but not yet visually
 confirmed in a live window (a real multi-frame animation playing correctly on screen is
-still unverified by an actual human). **Launch time**: the NVIDIA-wake bug is genuinely
-fixed (`puppy/render/gpu.py` restricts wgpu-native's Instance to non-GL backends —
-confirmed still in place and not regressed as of 2026-09-03), but total cold launch is
-still honestly ~1.1-1.5s, and the shared-Mesa-shader-cache-eviction theory floated as the
-explanation for the worse ~2.5s cases has now been **tested and refuted** (2026-09-03:
-disabled-cache, isolated-cold, and isolated-warm trials were all statistically
-indistinguishable — see that entry). The two remaining real options, neither picked
-yet: defer first paint past `CellRenderer`'s pipeline-creation step so the ~0.3s becomes
-invisible even though it's still spent, or accept ~1.1-1.5s as this architecture's
-honest cost and stop chasing it. Eight things total are now real-but-only-smoke/
-unit-tested, not yet interactively/visually confirmed by a human: the visible cursor
-(needs a theme with real cursor/bg contrast — see the cursor entry for which one), text
-selection, scrollback view, double/triple-click, config.toml's `font_size` actually
-resizing glyphs live, the `a=p`/`a=d`/`a=q`/z-index/cropping graphics work, this pass's
-animation playback, and (implicitly, always) every launch-time number itself, which is
-all synthetic-script-measured, never stopwatched by a human actually running `puppy`.
+still unverified by an actual human). **Launch time is now closed, pending a new
+concrete lead**: the NVIDIA-wake bug is genuinely fixed (`puppy/render/gpu.py` restricts
+wgpu-native's Instance to non-GL backends), the shared-Mesa-shader-cache-eviction theory
+was tested and refuted, and the window now paints its real background immediately after
+creation instead of sitting undefined through `CellRenderer`'s ~0.3s shader-compile step
+(all three as of 2026-09-03 — see the two entries above). Total *actual* cold launch is
+still an honest ~1.1-1.5s with no further actionable lever short of a much bigger
+architecture change; recommend not spending more time here unless something new turns
+up. Eight things total are now real-but-only-smoke/unit-tested, not yet
+interactively/visually confirmed by a human: the visible cursor (needs a theme with real
+cursor/bg contrast — see the cursor entry for which one), text selection, scrollback
+view, double/triple-click, config.toml's `font_size` actually resizing glyphs live, the
+`a=p`/`a=d`/`a=q`/z-index/cropping graphics work, this pass's animation playback, and
+(implicitly, always) every launch-time number itself, which is all
+synthetic-script-measured — the one live launch this session (used to confirm the early
+paint above) was deliberately brief and terminated by the test itself, not a real
+day-to-day session.
 
 **`a=c` (compose two already-existing frames) was explicitly scoped out of this
 pass** — a real, separate follow-up if animation work continues (see the Current
