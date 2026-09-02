@@ -21,7 +21,17 @@ created as `rgba8unorm_srgb` -- the GPU auto-decodes to linear on sample,
 matching the surface's own auto-encode-on-write, instead of needing a manual
 `srgb_to_linear` step the way plain per-vertex colors do.
 
-v2 scope (this pass): placements now carry real crop (`src_x`/`src_y`/
+v3 scope (this pass): each placement's *image* can now be animated
+(`puppy.graphics`'s `a=f`/`a=a`) -- `Image.current_frame_index` says which
+frame is currently live, and the texture cache below is keyed on
+`(image.id, frame_number)` rather than image identity alone, so switching
+frames (client- or terminal-driven) uploads and then reuses a real per-frame
+texture instead of only ever caching the root frame. Cache invalidation still
+works the same way as before per key: a frame's `data` bytes object changes
+identity whenever `puppy.graphics` composites new pixels into it (editing a
+frame via `a=f,r=`), which the identity check below catches and re-uploads.
+
+v2 scope: placements now carry real crop (`src_x`/`src_y`/
 `src_width`/`src_height`, 0 meaning "to the image's edge") and explicit
 `num_cols`/`num_rows`, both resolved here at render time from the `Placement`
 fields `puppy.graphics` now populates for `a=p`/`a=T`. Placements are drawn
@@ -133,23 +143,28 @@ class GraphicsRenderer:
             },
             primitive={"topology": wgpu.PrimitiveTopology.triangle_list},
         )
-        # image_id -> (Image instance last uploaded, gpu texture). Identity
-        # check (not just id) so a redefinition of the same image id (a real,
-        # if v1-unhandled-elsewhere, retransmission case) re-uploads instead
-        # of silently keeping stale pixels.
-        self._textures: dict[int, tuple[object, object]] = {}
+        # (image_id, frame_number) -> (data bytes object last uploaded, gpu
+        # texture). Identity check (not just equality) so a redefinition of
+        # the same image id or an in-place frame edit (a real retransmission
+        # case) re-uploads instead of silently keeping stale pixels.
+        self._textures: dict[tuple[int, int], tuple[object, object]] = {}
 
-    def _texture_for(self, image) -> object:
-        cached = self._textures.get(image.id)
-        if cached is not None and cached[0] is image:
+    def _texture_for(self, image, frame_number: int) -> object:
+        if frame_number <= 1:
+            data, fmt = image.data, image.format
+        else:
+            data, fmt = image.frames[frame_number - 2].data, 32
+        key = (image.id, frame_number)
+        cached = self._textures.get(key)
+        if cached is not None and cached[0] is data:
             return cached[1]
         device = self.gpu.device
-        if image.format == 24:
-            rgb = np.frombuffer(image.data, dtype=np.uint8).reshape(image.height, image.width, 3)
+        if fmt == 24:
+            rgb = np.frombuffer(data, dtype=np.uint8).reshape(image.height, image.width, 3)
             alpha = np.full((image.height, image.width, 1), 255, dtype=np.uint8)
-            data = np.ascontiguousarray(np.dstack([rgb, alpha])).tobytes()
+            tex_data = np.ascontiguousarray(np.dstack([rgb, alpha])).tobytes()
         else:
-            data = image.data
+            tex_data = data
         texture = device.create_texture(
             size=(image.width, image.height, 1),
             format=wgpu.TextureFormat.rgba8unorm_srgb,
@@ -157,11 +172,11 @@ class GraphicsRenderer:
         )
         device.queue.write_texture(
             {"texture": texture},
-            data,
+            tex_data,
             {"bytes_per_row": image.width * 4},
             (image.width, image.height, 1),
         )
-        self._textures[image.id] = (image, texture)
+        self._textures[key] = (data, texture)
         return texture
 
     def render(self, graphics: GraphicsManager, cols: int, rows: int, cell_width: float, cell_height: float) -> None:
@@ -194,7 +209,7 @@ class GraphicsRenderer:
             image = graphics.images.get(placement.image_id)
             if image is None:
                 continue
-            texture = self._texture_for(image)
+            texture = self._texture_for(image, image.current_frame_index + 1)
             num_cols = placement.num_cols or max(1, math.ceil(image.width / cell_width))
             num_rows = placement.num_rows or max(1, math.ceil(image.height / cell_height))
             top = 1.0 - placement.row * dy

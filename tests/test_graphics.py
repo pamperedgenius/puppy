@@ -516,3 +516,302 @@ def test_delete_unrecognized_action_is_ignored_not_crashed():
     gm.handle_command({"a": "p", "i": "1"}, b"", cursor_row=0, cursor_col=0)
     gm.handle_command({"a": "d", "d": "n"}, b"", cursor_row=0, cursor_col=0)  # by-number, unsupported
     assert len(gm.placements) == 1
+
+
+# --- a=f (animation frame load) / a=a (animation control) ---
+
+
+def _solid_rgb(width: int, height: int, pixel: tuple[int, int, int]) -> bytes:
+    return bytes(pixel) * (width * height)
+
+
+def _solid_rgba(width: int, height: int, pixel: tuple[int, int, int, int]) -> bytes:
+    return bytes(pixel) * (width * height)
+
+
+def _root_image(gm: GraphicsManager, image_id: int, width: int, height: int, pixel: tuple[int, int, int]) -> None:
+    gm.handle_command(
+        {"a": "t", "f": "24", "s": str(width), "v": str(height), "i": str(image_id)},
+        _b64(_solid_rgb(width, height, pixel)),
+        cursor_row=0, cursor_col=0,
+    )
+
+
+def test_animation_frame_full_transmit_creates_a_new_frame_with_default_gap():
+    gm = GraphicsManager()
+    _root_image(gm, 1, 2, 2, (255, 0, 0))
+    response = gm.handle_command(
+        {"a": "f", "f": "24", "i": "1"}, _b64(_solid_rgb(2, 2, (0, 255, 0))), cursor_row=0, cursor_col=0,
+    )
+    assert response == b"\x1b_Gi=1;OK\x1b\\"
+    image = gm.images[1]
+    assert len(image.frames) == 1
+    assert image.frames[0].gap == 40  # kitty's real DEFAULT_GAP
+    assert image.frames[0].data == bytes((0, 255, 0, 255)) * 4  # normalized to RGBA
+    # root frame itself is untouched
+    assert image.data == _solid_rgb(2, 2, (255, 0, 0))
+
+
+def test_animation_frame_gap_explicit_and_gapless():
+    gm = GraphicsManager()
+    _root_image(gm, 1, 2, 2, (0, 0, 0))
+    gm.handle_command({"a": "f", "f": "24", "i": "1", "z": "75"}, _b64(_solid_rgb(2, 2, (1, 1, 1))), cursor_row=0, cursor_col=0)
+    gm.handle_command({"a": "f", "f": "24", "i": "1", "z": "-1"}, _b64(_solid_rgb(2, 2, (2, 2, 2))), cursor_row=0, cursor_col=0)
+    image = gm.images[1]
+    assert image.frames[0].gap == 75
+    assert image.frames[1].gap == 0  # negative == gapless, floored at 0
+
+
+def test_animation_frame_partial_rect_composites_over_transparent_black_by_default():
+    gm = GraphicsManager()
+    _root_image(gm, 1, 4, 4, (10, 10, 10))
+    # A 2x2 opaque blue rect at offset (1, 1) within a new 4x4 frame.
+    response = gm.handle_command(
+        {"a": "f", "f": "32", "s": "2", "v": "2", "x": "1", "y": "1", "i": "1"},
+        _b64(_solid_rgba(2, 2, (0, 0, 255, 255))),
+        cursor_row=0, cursor_col=0,
+    )
+    assert response == b"\x1b_Gi=1;OK\x1b\\"
+    frame = gm.images[1].frames[0]
+    import numpy as np
+    arr = np.frombuffer(frame.data, dtype=np.uint8).reshape(4, 4, 4)
+    assert list(arr[0, 0]) == [0, 0, 0, 0]  # outside the rect: default transparent black
+    assert list(arr[1, 1]) == [0, 0, 255, 255]  # inside the rect
+    assert list(arr[2, 2]) == [0, 0, 255, 255]
+    assert list(arr[3, 3]) == [0, 0, 0, 0]
+
+
+def test_animation_frame_solid_background_color_via_Y():
+    gm = GraphicsManager()
+    _root_image(gm, 1, 2, 2, (0, 0, 0))
+    response = gm.handle_command(
+        {"a": "f", "f": "24", "s": "1", "v": "1", "i": "1", "Y": "4278190335"},  # 0xff0000ff opaque red
+        _b64(_solid_rgb(1, 1, (0, 255, 0))),
+        cursor_row=0, cursor_col=0,
+    )
+    assert response == b"\x1b_Gi=1;OK\x1b\\"
+    import numpy as np
+    arr = np.frombuffer(gm.images[1].frames[0].data, dtype=np.uint8).reshape(2, 2, 4)
+    assert list(arr[0, 0]) == [0, 255, 0, 255]  # the transmitted 1x1 opaque rect, at (0,0)
+    assert list(arr[1, 1]) == [255, 0, 0, 255]  # background color fills the rest: opaque red
+
+
+def test_animation_frame_base_ref_c_copies_a_previous_frames_data():
+    gm = GraphicsManager()
+    _root_image(gm, 1, 2, 2, (9, 9, 9))
+    # c=1: base the new frame on the root frame's own data, then overlay a
+    # 1x1 opaque pixel at (0, 0).
+    gm.handle_command(
+        {"a": "f", "f": "24", "s": "1", "v": "1", "i": "1", "c": "1"},
+        _b64(_solid_rgb(1, 1, (255, 255, 255))),
+        cursor_row=0, cursor_col=0,
+    )
+    import numpy as np
+    arr = np.frombuffer(gm.images[1].frames[0].data, dtype=np.uint8).reshape(2, 2, 4)
+    assert list(arr[0, 0]) == [255, 255, 255, 255]  # overwritten by the transmitted pixel
+    assert list(arr[1, 1]) == [9, 9, 9, 255]  # carried over from the root frame (c=1)
+
+
+def test_animation_frame_overwrite_composition_mode_X_1_ignores_alpha():
+    gm = GraphicsManager()
+    _root_image(gm, 1, 1, 1, (0, 0, 0))
+    gm.handle_command(
+        {"a": "f", "f": "32", "s": "1", "v": "1", "i": "1", "X": "1"},
+        _b64(_solid_rgba(1, 1, (200, 100, 50, 0))),  # fully transparent, but X=1 means plain replace
+        cursor_row=0, cursor_col=0,
+    )
+    assert gm.images[1].frames[0].data == bytes((200, 100, 50, 0))
+
+
+def test_animation_frame_edit_existing_frame_via_r_updates_it_in_place():
+    gm = GraphicsManager()
+    _root_image(gm, 1, 2, 2, (0, 0, 0))
+    gm.handle_command({"a": "f", "f": "24", "i": "1"}, _b64(_solid_rgb(2, 2, (1, 1, 1))), cursor_row=0, cursor_col=0)
+    original_gap = gm.images[1].frames[0].gap
+    response = gm.handle_command(
+        {"a": "f", "f": "24", "s": "1", "v": "1", "i": "1", "r": "2", "X": "1"},
+        _b64(_solid_rgb(1, 1, (250, 250, 250))),
+        cursor_row=0, cursor_col=0,
+    )
+    assert response == b"\x1b_Gi=1;OK\x1b\\"
+    image = gm.images[1]
+    assert len(image.frames) == 1  # edited in place, not a new frame
+    assert image.frames[0].gap == original_gap  # no z= given -> gap unchanged
+    import numpy as np
+    arr = np.frombuffer(image.frames[0].data, dtype=np.uint8).reshape(2, 2, 4)
+    assert list(arr[0, 0]) == [250, 250, 250, 255]
+    assert list(arr[1, 1]) == [1, 1, 1, 255]  # rest of the existing frame untouched
+
+
+def test_animation_frame_unknown_image_id_responds_enoent():
+    gm = GraphicsManager()
+    response = gm.handle_command({"a": "f", "f": "24", "s": "1", "v": "1", "i": "99"}, _b64(_solid_rgb(1, 1, (0, 0, 0))), cursor_row=0, cursor_col=0)
+    assert response is not None and b"ENOENT" in response
+
+
+def test_animation_frame_bad_r_reference_responds_einval():
+    gm = GraphicsManager()
+    _root_image(gm, 1, 1, 1, (0, 0, 0))
+    response = gm.handle_command(
+        {"a": "f", "f": "24", "s": "1", "v": "1", "i": "1", "r": "5"}, _b64(_solid_rgb(1, 1, (0, 0, 0))), cursor_row=0, cursor_col=0,
+    )
+    assert response is not None and b"EINVAL" in response
+
+
+def test_animation_control_c_jumps_to_a_specific_frame_client_driven():
+    gm = GraphicsManager()
+    _root_image(gm, 1, 1, 1, (0, 0, 0))
+    gm.handle_command({"a": "f", "f": "24", "i": "1"}, _b64(_solid_rgb(1, 1, (1, 1, 1))), cursor_row=0, cursor_col=0)
+    gm.handle_command({"a": "f", "f": "24", "i": "1"}, _b64(_solid_rgb(1, 1, (2, 2, 2))), cursor_row=0, cursor_col=0)
+    response = gm.handle_command({"a": "a", "i": "1", "c": "3"}, b"", cursor_row=0, cursor_col=0)
+    assert response == b"\x1b_Gi=1;OK\x1b\\"
+    assert gm.images[1].current_frame_index == 2  # frame number 3 -> extra_frames[1]
+
+
+def test_animation_control_gap_via_r_and_z_including_root_frame():
+    gm = GraphicsManager()
+    _root_image(gm, 1, 1, 1, (0, 0, 0))
+    gm.handle_command({"a": "a", "i": "1", "r": "1", "z": "123"}, b"", cursor_row=0, cursor_col=0)
+    assert gm.images[1].root_gap == 123  # the only way to give the root frame a nonzero gap
+
+
+def test_animation_control_unknown_image_id_responds_enoent():
+    gm = GraphicsManager()
+    response = gm.handle_command({"a": "a", "i": "42", "s": "3"}, b"", cursor_row=0, cursor_col=0)
+    assert response is not None and b"ENOENT" in response
+
+
+def test_animation_control_state_start_sets_running_and_resets_loop_counter():
+    gm = GraphicsManager()
+    _root_image(gm, 1, 1, 1, (0, 0, 0))
+    gm.handle_command({"a": "f", "f": "24", "i": "1"}, _b64(_solid_rgb(1, 1, (1, 1, 1))), cursor_row=0, cursor_col=0)
+    gm.images[1].current_loop = 7
+    gm.handle_command({"a": "a", "i": "1", "s": "3"}, b"", cursor_row=0, cursor_col=0)
+    image = gm.images[1]
+    assert image.animation_state == 2  # running
+    assert image.current_loop == 0
+    assert image.frame_shown_at > 0
+
+
+def test_animation_control_loop_count_v_encodes_as_max_loops_minus_one():
+    gm = GraphicsManager()
+    _root_image(gm, 1, 1, 1, (0, 0, 0))
+    gm.handle_command({"a": "a", "i": "1", "v": "3"}, b"", cursor_row=0, cursor_col=0)
+    assert gm.images[1].max_loops == 2
+    gm.handle_command({"a": "a", "i": "1", "v": "1"}, b"", cursor_row=0, cursor_col=0)
+    assert gm.images[1].max_loops == 0  # v=1 -- infinite, kitty's own encoding
+
+
+def _gap_key(gap: int) -> str:
+    # z=0 means "use the default gap", not "gap of exactly zero" -- per spec
+    # the only way to request a real zero/gapless frame is a negative value,
+    # which floors to 0 (see test_animation_frame_gap_explicit_and_gapless).
+    return "-1" if gap == 0 else str(gap)
+
+
+def _animated_image(gm: GraphicsManager, image_id: int, gaps: list[int]) -> None:
+    """A root frame plus one extra frame per gap in `gaps[1:]`, with the root
+    frame's own gap set to gaps[0] (only settable via a=a r=1). Each frame is
+    a distinct 1x1 solid color so tests can identify which is current."""
+    _root_image(gm, image_id, 1, 1, (0, 0, 0))
+    gm.handle_command({"a": "a", "i": str(image_id), "r": "1", "z": _gap_key(gaps[0])}, b"", cursor_row=0, cursor_col=0)
+    for n, gap in enumerate(gaps[1:], start=1):
+        gm.handle_command(
+            {"a": "f", "f": "24", "i": str(image_id), "z": _gap_key(gap)},
+            _b64(_solid_rgb(1, 1, (n, n, n))),
+            cursor_row=0, cursor_col=0,
+        )
+
+
+def test_tick_advances_and_loops_when_state_is_running():
+    gm = GraphicsManager()
+    _animated_image(gm, 1, gaps=[10, 10, 10])  # root + 2 extra frames, 10ms apart
+    gm.handle_command({"a": "a", "i": "1", "s": "3"}, b"", cursor_row=0, cursor_col=0)
+    image = gm.images[1]
+    t0 = image.frame_shown_at
+
+    assert gm.tick(t0 + 0.005) is False  # gap not elapsed yet
+    assert image.current_frame_index == 0
+
+    assert gm.tick(t0 + 0.011) is True
+    assert image.current_frame_index == 1
+
+    assert gm.tick(t0 + 0.022) is True
+    assert image.current_frame_index == 2
+
+    assert gm.tick(t0 + 0.033) is True  # wraps back to root, one loop completed
+    assert image.current_frame_index == 0
+    assert image.current_loop == 1
+
+
+def test_tick_stalls_at_the_end_when_loading_then_resumes_on_a_new_frame():
+    gm = GraphicsManager()
+    _animated_image(gm, 1, gaps=[10, 10])  # root + 1 extra frame
+    gm.handle_command({"a": "a", "i": "1", "s": "2"}, b"", cursor_row=0, cursor_col=0)  # loading
+    image = gm.images[1]
+    t0 = image.frame_shown_at
+
+    assert gm.tick(t0 + 0.011) is True
+    assert image.current_frame_index == 1
+
+    # Would wrap back to the root next, but s=2 (loading) freezes here instead.
+    assert gm.tick(t0 + 0.100) is False
+    assert image.current_frame_index == 1
+
+    gm.handle_command({"a": "f", "f": "24", "i": "1", "z": "10"}, _b64(_solid_rgb(1, 1, (9, 9, 9))), cursor_row=0, cursor_col=0)
+    assert gm.tick(t0 + 0.200) is True
+    assert image.current_frame_index == 2  # the newly transmitted frame, not a wrap to root
+
+
+def test_tick_respects_max_loops():
+    # v=3 -> max_loops=2 -> 2 total passes through the sequence, confirmed
+    # against kitty's real scan_active_animations: a wrap only actually
+    # happens (current_frame_index reset to 0) while the *post-increment*
+    # loop counter is still below max_loops -- once it reaches max_loops the
+    # wrap is refused and current_frame_index freezes at its last value
+    # (never resetting to the root frame for that final, refused wrap).
+    gm = GraphicsManager()
+    _animated_image(gm, 1, gaps=[10, 10])  # root + 1 extra frame
+    gm.handle_command({"a": "a", "i": "1", "s": "3", "v": "3"}, b"", cursor_row=0, cursor_col=0)
+    image = gm.images[1]
+    t0 = image.frame_shown_at
+
+    assert gm.tick(t0 + 0.011) is True
+    assert image.current_frame_index == 1  # pass 1: last frame
+
+    assert gm.tick(t0 + 0.022) is True  # successful wrap: pass 2 begins
+    assert image.current_frame_index == 0
+    assert image.current_loop == 1
+
+    assert gm.tick(t0 + 0.033) is True
+    assert image.current_frame_index == 1  # pass 2: last frame
+
+    assert gm.tick(t0 + 0.044) is False  # 2nd wrap attempt hits max_loops -- refused, frozen here
+    assert image.current_frame_index == 1
+
+
+def test_tick_skips_gapless_frames_within_one_tick():
+    gm = GraphicsManager()
+    _animated_image(gm, 1, gaps=[10, 0, 20])  # frame 2 (index 1) is gapless
+    gm.handle_command({"a": "a", "i": "1", "s": "3"}, b"", cursor_row=0, cursor_col=0)
+    image = gm.images[1]
+    t0 = image.frame_shown_at
+    assert gm.tick(t0 + 0.011) is True
+    assert image.current_frame_index == 2  # skipped straight past the gapless frame 1
+
+
+def test_tick_does_nothing_when_every_frame_is_gapless():
+    gm = GraphicsManager()
+    _animated_image(gm, 1, gaps=[0, 0])
+    gm.handle_command({"a": "a", "i": "1", "s": "3"}, b"", cursor_row=0, cursor_col=0)
+    image = gm.images[1]
+    assert gm.tick(image.frame_shown_at + 10.0) is False
+    assert image.current_frame_index == 0
+
+
+def test_tick_does_nothing_for_stopped_animation():
+    gm = GraphicsManager()
+    _animated_image(gm, 1, gaps=[10, 10])
+    image = gm.images[1]
+    assert gm.tick(image.frame_shown_at + 10.0) is False
+    assert image.current_frame_index == 0

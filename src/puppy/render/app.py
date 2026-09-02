@@ -246,6 +246,12 @@ def run(rows: int = 24, cols: int = 80, pixel_size: int | None = None) -> None:
         # blink flag is set (the DECSCUSR/default state) -- matches the classic
         # terminal cursor-blink cadence, not a made-up interval.
         show_cursor = screen.cursor_visible and (not screen.cursor_blink or int(time.time() * 2) % 2 == 0)
+        # Terminal-driven kitty-graphics animation (a=a s=2/s=3) advances here,
+        # same free-running-redraw model the cursor blink above already uses --
+        # this loop force_draw()s every iteration regardless, so there's no
+        # separate frame-pacing/scheduling to wire up (see puppy.graphics.
+        # GraphicsManager.tick's own docstring).
+        screen.graphics.tick(time.time())
         renderer.render(
             build_instances(
                 screen,

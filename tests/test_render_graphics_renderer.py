@@ -209,3 +209,63 @@ def test_no_placements_leaves_frame_untouched():
     img = canvas.draw()
 
     assert list(img[1, 1]) == [0, 255, 0, 255]
+
+
+def test_renders_current_animation_frame_not_just_the_root():
+    import base64
+
+    cell_w, cell_h = 4, 4
+    canvas = offscreen.RenderCanvas(size=(cell_w, cell_h))
+    gpu = GpuContext.create(canvas)
+    renderer = GraphicsRenderer(gpu)
+
+    graphics = GraphicsManager()
+    _load_rgb_image(graphics, 1, width=cell_w, height=cell_h, pixel=(255, 0, 0), row=0, col=0)  # root: red
+    graphics.handle_command(  # frame 2: green
+        {"a": "f", "f": "24", "i": "1"}, base64.b64encode(bytes((0, 255, 0)) * (cell_w * cell_h)), cursor_row=0, cursor_col=0,
+    )
+    graphics.handle_command({"a": "a", "i": "1", "c": "2"}, b"", cursor_row=0, cursor_col=0)  # jump to frame 2
+
+    def draw():
+        gpu.clear((0.0, 0.0, 0.0, 1.0))
+        renderer.render(graphics, cols=1, rows=1, cell_width=cell_w, cell_height=cell_h)
+
+    canvas.request_draw(draw)
+    img = canvas.draw()
+
+    assert list(img[1, 1]) == [0, 255, 0, 255]  # frame 2 (green), not the root (red)
+
+
+def test_editing_a_frame_in_place_invalidates_the_cached_texture():
+    import base64
+
+    cell_w, cell_h = 4, 4
+    canvas = offscreen.RenderCanvas(size=(cell_w, cell_h))
+    gpu = GpuContext.create(canvas)
+    renderer = GraphicsRenderer(gpu)
+
+    graphics = GraphicsManager()
+    _load_rgb_image(graphics, 1, width=cell_w, height=cell_h, pixel=(0, 0, 0), row=0, col=0)
+    graphics.handle_command(  # frame 2: red
+        {"a": "f", "f": "24", "i": "1"}, base64.b64encode(bytes((255, 0, 0)) * (cell_w * cell_h)), cursor_row=0, cursor_col=0,
+    )
+    graphics.handle_command({"a": "a", "i": "1", "c": "2"}, b"", cursor_row=0, cursor_col=0)
+
+    def draw():
+        gpu.clear((0.0, 0.0, 0.0, 1.0))
+        renderer.render(graphics, cols=1, rows=1, cell_width=cell_w, cell_height=cell_h)
+
+    canvas.request_draw(draw)
+    assert list(canvas.draw()[1, 1]) == [255, 0, 0, 255]  # first render: frame 2 is red, real GPU upload
+
+    # Edit frame 2 in place (r=2) to blue -- same texture cache key
+    # (image_id=1, frame_number=2), but a genuinely new `data` bytes object,
+    # which must invalidate the identity-checked cache and re-upload.
+    graphics.handle_command(
+        {"a": "f", "f": "24", "i": "1", "r": "2", "X": "1"},
+        base64.b64encode(bytes((0, 0, 255)) * (cell_w * cell_h)),
+        cursor_row=0, cursor_col=0,
+    )
+
+    canvas.request_draw(draw)
+    assert list(canvas.draw()[1, 1]) == [0, 0, 255, 255]  # re-uploaded: now blue

@@ -74,6 +74,110 @@ found because writing an honest terminfo entry (which has a `bce` capability fla
 forced the question "do we actually do this?" Worth treating protocol/terminfo work
 as a trigger for another verification pass, not just a one-time audit.
 
+## Current status (2026-09-02, kitty graphics animation: a=f/a=a)
+
+User picked "Animation (a=a/a=f)" off the standing candidate list (vs. keybind config,
+tabs/splits, Sixel) when asked which feature to build next, matching this file's own
+"real candidates, none picked unilaterally" note in the prior Next-steps entry.
+
+Added the two remaining kitty-graphics actions the 2026-09-02 completeness pass below
+explicitly scoped out as a separate, larger subsystem: `a=f` (transmit animation frame
+data -- a new frame by default, or edit an existing one via `r=`, composited onto a
+background canvas that's either a previous frame's data, the frame being edited itself,
+or a solid `Y=` color) and `a=a` (animation control: `c=` jumps to a frame client-side,
+`s=` starts/stops terminal-driven playback with `2`=run-but-freeze-at-the-end vs.
+`3`=run-and-loop, `v=` sets the loop count, `r=`+`z=` sets an existing frame's gap --
+the only way to give the root frame a nonzero gap, since it has none by construction).
+`a=c` (compose two *already-existing* frames -- a distinct, rarer feature from the
+frame-loading compositing `a=f` itself does) stays out of scope, same as before.
+
+Read kitty's real `graphics.c` (`handle_animation_frame_load_command`,
+`handle_animation_control_command`, `scan_active_animations`, the `Frame`/`Image`
+struct fields in `graphics.h`) and the protocol doc's own animation section
+(`docs/graphics-protocol.rst`) before writing anything, not from memory -- caught
+several nonobvious real behaviors this way, all now covered by tests: frame numbers are
+1-based and uniform across root+extra frames (`c=1`/`r=1` mean the root frame, in both
+`a=f` and `a=a`); a frame's gap floors negative ("gapless") values to `0`, and `z=0` on
+a *new* frame means "use the default 40ms", not "gap of exactly zero" -- there is no way
+to request a literal zero gap except the negative/gapless form; terminal-driven playback
+only actually advances when the image has at least one extra frame *and* the sum of
+every frame's gap is nonzero (an all-gapless animation just never plays, rather than
+busy-looping forever with no visible effect -- confirmed this is kitty's own real
+`image_is_animatable` gate, not an edge case worth skipping); gapless frames are hopped
+over within a single tick until landing on one with a real gap; `s=2` (loading) freezes
+on whatever frame is current when it would otherwise wrap, rather than looping, and
+correctly resumes the instant a new frame arrives; and reaching `v=`'s loop limit
+freezes the animation on its *current* frame at the point the wrap is refused -- it does
+**not** perform one final wrap back to the root frame first (traced this precisely
+against `scan_active_animations`'s do-while: the `goto skip_image` on a refused wrap
+happens *before* `img->current_frame_index = next`, not after).
+
+One deliberate simplification, not a bug: every frame is stored fully composited at
+image width*height RGBA8 the moment it's transmitted/edited, not kitty's lazy
+`base_frame_id` reference-chain representation that only fully renders a frame when
+something actually needs its pixels. This project already treats "don't pre-optimize,
+direct per-item work is fine at real-world scale" as a standing performance philosophy
+(see `puppy.render.graphics_renderer`'s own module docstring on draw-call counts, and
+the parser's byte-level state machine) -- real terminal animations (a spinner, a small
+sprite) are tiny compared to what kitty's reference-chain optimization actually exists
+for (long, video-like animations past a real length threshold it special-cases). If
+that assumption ever turns out wrong for something the user actually wants to run,
+switching a specific frame's storage to lazy/on-demand compositing is a contained change
+inside `_finalize_animation_frame`/`_frame_array`, not a rearchitecture.
+
+Compositing math (straight-alpha "over", matching kitty's real `alpha_blend()`) is
+implemented with real vectorized numpy array ops in `GraphicsManager._composite`, not a
+nested Python pixel loop -- `puppy.graphics` didn't depend on numpy before this pass
+(kept deliberately minimal, stdlib + Pillow only for the PNG path), but a pure-Python
+double loop would make a 10000x10000 `MAX_IMAGE_DIMENSION`-sized animated image (a legal,
+if extreme, transmission) audibly slow; numpy was already a hard dependency of the
+render layer regardless, so this doesn't add a new dependency to the project, just to
+this one module.
+
+`GraphicsManager.tick(now)` is the new piece the render layer must actually call --
+owns only *which* frame is current for each image, not drawing it. Wired into
+`render/app.py`'s existing `draw_frame()` via `screen.graphics.tick(time.time())`,
+using the same wall clock the cursor blink already reads there. No new scheduling
+machinery was needed: this project's render loop already `force_draw()`s
+unconditionally every iteration (a ~100Hz busy loop gated only by the PTY-read
+`select()` timeout), the same reason cursor blink needed no timer of its own --
+confirmed by reading `run()`'s main loop before assuming a frame-pacing mechanism
+was needed.
+
+`render/graphics_renderer.py`'s per-image texture cache is now keyed on
+`(image_id, frame_number)` instead of image identity alone (an animated image is one
+long-lived `Image` object whose `current_frame_index` changes, not a new object per
+frame) -- the identity check on the cached data bytes still catches in-place frame
+edits (`a=f,r=`) correctly, since compositing always produces a new bytes object,
+confirmed via a real GPU pixel-readback test (`test_editing_a_frame_in_place_
+invalidates_the_cached_texture`) that edits a displayed frame and checks the next
+render actually shows the new color, not a stale upload.
+
+**Test coverage**: 22 new tests (394 total, all passing) -- 20 in `test_graphics.py`
+covering `a=f` (new frame, edit-in-place, `c=`/`r=`/`X=`/`Y=` base-canvas and
+compose-mode combinations, gap resolution including the `z=0` vs. `z=-1` distinction,
+ENOENT/EINVAL error responses), `a=a` (client-driven jump, state transitions, loop-count
+encoding, root-frame gap-setting), and `GraphicsManager.tick` (basic advance-and-loop,
+the loading-state stall-then-resume case, max-loops freeze-without-final-wrap, gapless-
+frame skipping, the all-gapless no-op case, and stopped/never-started no-op) -- plus 2
+real-GPU pixel-readback tests in `test_render_graphics_renderer.py` (renders the current
+frame rather than always the root; re-uploads after an in-place frame edit). Also ran a
+one-off manual integration script feeding real escape-sequence bytes through
+`Parser.feed()` -> `Screen.graphics_command()` -> `GraphicsManager` end to end (not kept
+as a test file, just a sanity check that control-key case-sensitivity — e.g. `X=`
+staying distinct from `x=` — survives the real APC parser, not just direct
+`handle_command()` calls) -- confirmed clean.
+
+**Not done, and not a small add-on to this pass** (same conclusion the prior session
+reached, now with the actual implementation experience behind it): `a=c` (compose)
+operates on two frames that already fully exist, entirely separate from `a=f`'s
+transmit-and-composite path, and needs its own EINVAL/ENOENT/ENOSPC-on-overlap
+validation per the spec's compose section -- a real, contained, but separate follow-up
+if animation work continues. Visual/interactive confirmation (an actual multi-frame GIF
+or hand-crafted spinner playing correctly in a live puppy window) has **not** happened --
+same "real-but-only-smoke/unit-tested" category as the six items already listed in
+Next-steps below, joining rather than replacing that list.
+
 ## Current status (2026-09-02, kitty graphics completeness: a=p/a=d/a=q, z-index)
 
 User picked this off the standing candidate list (kitty-graphics completeness vs.
@@ -1695,33 +1799,34 @@ dependencies live there, not in system Python. `pip install -e .` again if the v
 is ever recreated (it's gitignored).
 
 **Nothing is mid-flight; there is no unfinished code to pick back up.** Everything
-through the 2026-09-02 kitty-graphics-completeness pass (see the "Current status
-(2026-09-02, ...)" entry above for full detail) is real, committed, pushed,
-test-covered (372 passing), and confirmed via a direct `Screen`-level
-integration smoke test — but not yet visually confirmed in a live window (a
-puppy instance was already running on the desktop this session; didn't touch it
-per the live-window-testing rule). **Launch time was also chased down and
-actually fixed this same session** (see the "Current status (2026-09-02, launch
-time -- ROOT CAUSE FOUND AND FIXED, in-code)" entry above, which supersedes two
-earlier same-session dead-end write-ups) — `puppy/render/gpu.py` now restricts
-wgpu-native's Instance to non-GL backends, which stops it from waking this
-laptop's discrete NVIDIA GPU on every launch. Real, in-code, zero system
-changes, confirmed across multiple genuinely-cold trials. Six things total are
-now real-but-only-smoke-tested, not
-yet interactively/visually confirmed by a human: the visible cursor (needs a
-theme with real cursor/bg contrast — see the cursor entry for which one), text
-selection, scrollback view, double/triple-click, config.toml's `font_size`
-actually resizing glyphs live, and this session's `a=p`/`a=d`/`a=q`/z-index/
-cropping graphics work. Genuinely worth prioritizing launch-time profiling
-and/or a real interactive pass over more new features at this point.
+through the 2026-09-02 animation pass (see the "Current status (2026-09-02, kitty
+graphics animation: a=f/a=a)" entry above for full detail) is real, committed, pushed,
+test-covered (394 passing, up from 372), and confirmed via both real GPU pixel-readback
+tests and a direct `Parser`->`Screen`->`GraphicsManager` integration smoke test — but not
+yet visually confirmed in a live window (no puppy instance was running this session to
+avoid per the live-window-testing rule; a real multi-frame animation playing correctly
+on screen is still unverified by an actual human). **Launch time was also chased down
+and actually fixed** in an earlier same-day session (see the "Current status
+(2026-09-02, launch time -- ROOT CAUSE FOUND AND FIXED, in-code)" entry above, which
+supersedes two earlier same-session dead-end write-ups) — `puppy/render/gpu.py` now
+restricts wgpu-native's Instance to non-GL backends, which stops it from waking this
+laptop's discrete NVIDIA GPU on every launch. Real, in-code, zero system changes,
+confirmed across multiple genuinely-cold trials. Seven things total are now
+real-but-only-smoke/unit-tested, not yet interactively/visually confirmed by a human:
+the visible cursor (needs a theme with real cursor/bg contrast — see the cursor entry
+for which one), text selection, scrollback view, double/triple-click, config.toml's
+`font_size` actually resizing glyphs live, the `a=p`/`a=d`/`a=q`/z-index/cropping
+graphics work, and now this pass's animation playback. Genuinely worth prioritizing
+launch-time profiling (already done, see above) and/or a real interactive pass over
+more new features at this point — the smoke-tested-but-unconfirmed list keeps growing
+while nothing on it has been checked by a human yet.
 
-**Animation (`a=a`/`a=f`) was explicitly scoped out of the 2026-09-02 pass** —
-it's a genuinely large separate subsystem (frame loading, gaps, composition
-modes, timers, GPU frame swapping), not a small add-on to put/delete/query/
-z-index. If graphics work continues, this is the natural next slice. Other
-real candidates, none picked unilaterally: keybind configuration (the one
-config-file piece deliberately deferred — see the config-file entry for why),
-tabs/splits, Sixel, or the interactive confirmation pass mentioned above.
+**`a=c` (compose two already-existing frames) was explicitly scoped out of this
+pass** — a real, separate follow-up if animation work continues (see the Current
+status entry for why it doesn't fold into `a=f`). Other real candidates, none picked
+unilaterally: keybind configuration (the one config-file piece deliberately deferred —
+see the config-file entry for why), tabs/splits, Sixel, or the interactive confirmation
+pass mentioned above.
 
 ### 2026-08-24 session recap (second live user bug-report pass)
 
